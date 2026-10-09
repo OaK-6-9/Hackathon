@@ -7,7 +7,6 @@ from docx import Document
 from pptx import Presentation
 from sentence_transformers import SentenceTransformer
 from sklearn.metrics.pairwise import cosine_similarity
-from torch import device
 import torch
 
 # =====================================================================
@@ -45,7 +44,7 @@ def extract_docx_text(uploaded_file) -> str:
 
 
 def extract_pptx_text(uploaded_file) -> str:
-    """Extract text from slide titles, text boxes, tables, and notes in a PPTX file."""
+    """Extract text from slides, tables, and notes in a PPTX file."""
     prs = Presentation(uploaded_file)
     parts = []
 
@@ -75,7 +74,7 @@ def extract_pptx_text(uploaded_file) -> str:
 
 
 def extract_document_text(uploaded_file, file_type: str) -> str:
-    """Route the uploaded file to the correct text extractor."""
+    """Route uploaded file to the correct text extractor."""
     if file_type == "pdf":
         return extract_pdf_text(uploaded_file)
     if file_type == "docx":
@@ -86,7 +85,7 @@ def extract_document_text(uploaded_file, file_type: str) -> str:
 
 
 def chunk_text(text: str, chunk_size: int = 400, overlap: int = 50) -> list:
-    """Splits document text into overlapping paragraph chunks for RAG search."""
+    """Splits document text into overlapping chunks for RAG search."""
     words = text.split()
     if not words:
         return []
@@ -96,6 +95,7 @@ def chunk_text(text: str, chunk_size: int = 400, overlap: int = 50) -> list:
         chunks.append(chunk)
     return chunks
 
+
 # =====================================================================
 # 2. LOCAL RAG & OLLAMA LLM INTEGRATION
 # =====================================================================
@@ -104,34 +104,34 @@ class IntelligentPDFEngine:
     def __init__(self, ollama_model: str = "llama3.2:1b"):
         self.ollama_model = ollama_model
         self.ollama_url = "http://localhost:11434/api/generate"
-        # Load local embedding model (~80MB RAM)
+        
         device = "cuda" if torch.cuda.is_available() else "cpu"
-
-        self.embedder = SentenceTransformer("all-MiniLM-L6-v2",device=device)
-
-        print("Embedding device:", device)
+        self.embedder = SentenceTransformer("all-MiniLM-L6-v2", device=device)
 
     def _call_ollama(self, prompt: str, json_format: bool = False) -> str:
-        """Sends a request to the local Ollama instance."""
+        """Sends request to local Ollama instance."""
         payload = {
             "model": self.ollama_model,
             "prompt": prompt,
-            "stream": False
+            "stream": False,
+            "options": {
+                "num_ctx": 4096
+            }
         }
         if json_format:
             payload["format"] = "json"
 
         try:
-            response = requests.post(self.ollama_url, json=payload, timeout=60)
+            response = requests.post(self.ollama_url, json=payload, timeout=90)
             if response.status_code == 200:
                 return response.json().get("response", "")
             else:
                 return "Error: Unable to connect to local Ollama server."
         except Exception as e:
-            return f"Error connecting to Ollama: {str(e)}. Make sure Ollama is running (`ollama serve`)."
+            return f"Error connecting to Ollama: {str(e)}"
 
     def get_relevant_chunks(self, query: str, chunks: list, top_k: int = 3) -> list:
-        """Finds the most relevant passages from the PDF using vector search."""
+        """Finds most relevant passages using vector search."""
         if not chunks:
             return []
         query_vec = self.embedder.encode([query])
@@ -140,172 +140,260 @@ class IntelligentPDFEngine:
         top_indices = np.argsort(sims)[::-1][:top_k]
         return [chunks[i] for i in top_indices]
 
-    def generate_summary(self, full_text: str, chunks: list) -> dict:
-        """Generate a comprehensive topic-by-topic summary using the entire document.
-
-        Uses hierarchical summarization so long documents are not truncated. Every
-        chunk is summarized, those summaries are grouped and merged, and the final
-        model call creates a structured study guide.
-        """
-        if not full_text.strip() or not chunks:
+    def generate_summary(self, full_text: str, progress_callback=None) -> dict:
+        """Fast block-aggregated summarization."""
+        words = full_text.split()
+        if not words:
             return {"overview": "No readable content found.", "sections": [], "key_takeaways": []}
 
-        # PASS 1: summarize every chunk. This makes sure content from every page/slide
-        # or document section gets represented, rather than using only the first part.
-        chunk_summaries = []
-        for idx, chunk in enumerate(chunks, start=1):
-            prompt = f"""You are an academic tutor. Summarize the following document section in detail.
-Cover ALL concepts, definitions, steps, examples, formulas, names, important facts,
-subtopics, and relationships that appear in this section. Do not invent information.
-Write 5-10 concise but informative bullet points. This is section {idx} of the document.
+        words_per_block = 2000
+        blocks = [" ".join(words[i:i + words_per_block]) for i in range(0, len(words), words_per_block)]
+        total_blocks = len(blocks)
 
-SECTION TEXT:
-{chunk}
+        block_summaries = []
 
-DETAILED SECTION SUMMARY:"""
-            result = self._call_ollama(prompt, json_format=False)
-            if result and not result.startswith("Error:"):
-                chunk_summaries.append(f"Section {idx}:\n{result.strip()}")
+        if total_blocks == 1:
+            if progress_callback:
+                progress_callback(0.5, "Generating complete document summary...")
+            
+            prompt = f"""You are an academic tutor. Create a comprehensive topic-by-topic study guide for this document.
 
-        if not chunk_summaries:
-            return {
-                "overview": "The document could not be summarized because the local model did not return usable output.",
-                "sections": [],
-                "key_takeaways": []
-            }
+DOCUMENT TEXT:
+{blocks[0]}
 
-        # PASS 2: merge small groups of chunk summaries. No middle chunks are dropped.
-        group_summaries = []
-        group_size = 6
-        for group_start in range(0, len(chunk_summaries), group_size):
-            group = chunk_summaries[group_start:group_start + group_size]
-            group_text = "\n\n==========\n\n".join(group)
-            prompt = f"""You are building a comprehensive study guide from consecutive sections of a document.
-Use ONLY the supplied section summaries. Combine related concepts but keep every distinct topic.
-Preserve important definitions, steps, formulas, examples, terminology, and facts.
-Do not invent or add outside information.
+Return ONLY valid JSON with this exact structure:
+{{
+  "overview": "Detailed overall overview of the document (4-6 sentences).",
+  "sections": [
+    {{
+      "title": "Topic Name",
+      "summary": "Detailed explanation of this topic.",
+      "key_points": ["Point 1", "Point 2", "Point 3"]
+    }}
+  ],
+  "key_takeaways": ["Takeaway 1", "Takeaway 2", "Takeaway 3"]
+}}"""
+            res = self._call_ollama(prompt, json_format=True)
+            try:
+                return json.loads(res)
+            except Exception:
+                return {"overview": res, "sections": [], "key_takeaways": []}
 
-Return a detailed topic outline in plain text. Use headings and bullet points.
+        for idx, block in enumerate(blocks, start=1):
+            if progress_callback:
+                progress_callback(
+                    (idx / (total_blocks + 1)), 
+                    f"Processing section block {idx} of {total_blocks}..."
+                )
+
+            prompt = f"""Summarize this portion of the document. Cover all key concepts, definitions, subtopics, and important facts.
+
+DOCUMENT BLOCK ({idx}/{total_blocks}):
+{block}
+
+SUMMARY OF BLOCK {idx}:"""
+            
+            res = self._call_ollama(prompt, json_format=False)
+            if res and not res.startswith("Error:"):
+                block_summaries.append(f"Section Block {idx}:\n{res.strip()}")
+
+        if progress_callback:
+            progress_callback(0.9, "Consolidating final structured summary...")
+
+        combined_blocks = "\n\n====================\n\n".join(block_summaries)
+
+        final_prompt = f"""You are an academic tutor creating a structured study guide from the following section summaries.
+Cover ALL topics represented across the document.
 
 SECTION SUMMARIES:
-{group_text}
-
-GROUPED TOPIC SUMMARY:"""
-            result = self._call_ollama(prompt, json_format=False)
-            if result and not result.startswith("Error:"):
-                group_summaries.append(f"Group {group_start // group_size + 1}:\n{result.strip()}")
-
-        if not group_summaries:
-            group_summaries = chunk_summaries
-
-        # PASS 3: final merge into structured JSON. Since this prompt contains only
-        # grouped summaries, it remains manageable even for large documents while
-        # retaining coverage of all source chunks.
-        grouped_text = "\n\n==============================\n\n".join(group_summaries)
-        prompt = f"""You are an expert academic tutor creating a comprehensive study guide from a complete document.
-Use ONLY the supplied grouped summaries. Do not add outside facts.
-
-Create a LONG, detailed summary that covers EVERY topic represented in the material.
-Group related content into logical topics, but do not combine unrelated topics just to make the answer shorter.
-The final summary should be useful for exam preparation and should preserve the document's terminology.
-
-For each topic include:
-- Topic title
-- Detailed explanation
-- Important subtopics/concepts
-- Definitions, formulas, steps, examples, or facts mentioned in the source when present
-- Important points students should remember
-
-Also provide:
-- A 4-6 sentence overall overview of the complete document
-- 8-15 important final key takeaways
+{combined_blocks}
 
 Return ONLY valid JSON matching this exact structure:
 {{
-  "overview": "Detailed overall overview of the complete document.",
+  "overview": "Comprehensive 4-6 sentence overview of the whole document.",
   "sections": [
     {{
-      "title": "Topic name",
+      "title": "Topic Name",
       "summary": "Detailed explanation of this topic.",
-      "key_points": ["Point 1", "Point 2", "Point 3", "Point 4"]
+      "key_points": ["Point 1", "Point 2", "Point 3"]
     }}
   ],
-  "key_takeaways": [
-    "Important takeaway 1",
-    "Important takeaway 2"
-  ]
-}}
+  "key_takeaways": ["Takeaway 1", "Takeaway 2", "Takeaway 3"]
+}}"""
 
-GROUPED SUMMARIES:
-{grouped_text}
-"""
-
-        response_text = self._call_ollama(prompt, json_format=True)
+        res = self._call_ollama(final_prompt, json_format=True)
         try:
-            data = json.loads(response_text)
-            data.setdefault("overview", "")
-            data.setdefault("sections", [])
-            data.setdefault("key_takeaways", [])
-            return data
+            return json.loads(res)
         except Exception:
-            # Fallback: display all grouped summaries rather than losing coverage.
             return {
-                "overview": "A comprehensive section-by-section summary is shown below because the final structured JSON could not be parsed.",
+                "overview": "Section-by-section breakdown compiled below:",
                 "sections": [
-                    {
-                        "title": f"Topic Group {idx + 1}",
-                        "summary": text.split(":\n", 1)[-1],
-                        "key_points": []
-                    }
-                    for idx, text in enumerate(group_summaries)
+                    {"title": f"Block {idx+1}", "summary": text, "key_points": []}
+                    for idx, text in enumerate(block_summaries)
                 ],
-                "key_takeaways": [
-                    "The summary above was generated from all readable sections of the uploaded document."
-                ]
+                "key_takeaways": []
             }
 
-    def generate_quiz(self, chunks: list, num_questions: int = 3) -> list:
-        """Generates real multiple-choice questions from document passages."""
-        selected_text = "\n\n".join(chunks[:3]) # Use initial context chunks
-        
-        prompt = f"""You are an exam writer. Based strictly on the text provided below, generate {num_questions} multiple-choice questions.
+    def generate_quiz(self, chunks: list, num_questions: int = 4) -> list:
+        """Generates clear, sensible quiz questions by focusing on 1 passage at a time."""
+        if not chunks:
+            return []
 
-Source Text:
+        valid_chunks = [c for c in chunks if len(c.split()) >= 60]
+        if not valid_chunks:
+            valid_chunks = chunks
+
+        step = max(1, len(valid_chunks) // num_questions)
+        sampled_chunks = [valid_chunks[i] for i in range(0, len(valid_chunks), step)][:num_questions]
+
+        validated_questions = []
+
+        for idx, passage in enumerate(sampled_chunks):
+            prompt = f"""You are a university professor creating an exam question based strictly on the passage below.
+
+READ THIS PASSAGE CAREFULLY:
+{passage}
+
+INSTRUCTIONS:
+1. Create ONE clear, realistic multiple-choice question testing a main concept explained in the passage.
+2. Provide EXACTLY 4 options:
+   - 1 option MUST be definitively CORRECT according to the passage.
+   - The other 3 options MUST be plausible, realistic wrong answers related to the subject matter. Do NOT write joke or silly options.
+3. Do NOT ask about page numbers, slide titles, or document layout.
+
+Return ONLY valid JSON matching this exact format:
+{{
+  "question": "What is ...?",
+  "options": [
+    "Plausible Option A",
+    "Plausible Option B",
+    "Plausible Option C",
+    "Plausible Option D"
+  ],
+  "correct_index": 0,
+  "explanation": "State clearly why the correct option is right based on the text."
+}}"""
+
+            response_text = self._call_ollama(prompt, json_format=True)
+
+            clean_text = response_text.strip()
+            if "```" in clean_text:
+                parts = clean_text.split("```")
+                for part in parts:
+                    if part.strip().startswith("json"):
+                        clean_text = part.strip()[4:].strip()
+                        break
+                    elif part.strip().startswith("{"):
+                        clean_text = part.strip()
+                        break
+
+            try:
+                data = json.loads(clean_text)
+                
+                q_text = data.get("question", "").strip()
+                opts = [str(o).strip() for o in data.get("options", []) if str(o).strip()]
+
+                try:
+                    c_idx = int(data.get("correct_index", 0))
+                except (ValueError, TypeError):
+                    c_idx = 0
+
+                if q_text and len(opts) >= 4:
+                    validated_questions.append({
+                        "question": q_text,
+                        "options": opts[:4],
+                        "correct_index": max(0, min(c_idx, 3)),
+                        "explanation": str(data.get("explanation", "Grounded in source passage.")).strip()
+                    })
+            except Exception:
+                continue
+
+        return validated_questions
+
+    def generate_question_paper(self, chunks: list) -> dict:
+        """Generates a formal exam question paper containing 5x 1-mark, 3x 3-mark, and 3x 5-mark questions ONLY."""
+        if not chunks:
+            return {}
+
+        valid_chunks = [c for c in chunks if len(c.split()) >= 50]
+        if not valid_chunks:
+            valid_chunks = chunks
+
+        step = max(1, len(valid_chunks) // 6)
+        sampled_chunks = [valid_chunks[i] for i in range(0, len(valid_chunks), step)][:6]
+        selected_text = "\n\n---\n\n".join(sampled_chunks)
+
+        prompt = f"""You are an expert academic examiner framing a formal examination question paper based on the provided text.
+
+SOURCE MATERIAL:
 {selected_text}
 
-Respond ONLY in valid JSON matching this structure:
+REQUIREMENTS:
+Generate a Question Paper containing ONLY QUESTIONS (no answers or options) structured as follows:
+- Section A: EXACTLY 5 short, direct questions worth 1 Mark each.
+- Section B: EXACTLY 3 short-answer conceptual questions worth 3 Marks each.
+- Section C: EXACTLY 3 detailed analytical/essay questions worth 5 Marks each.
+
+Return ONLY a valid JSON object matching this schema EXACTLY:
 {{
-  "questions": [
-    {{
-      "id": 1,
-      "question": "Clear question based on the text?",
-      "options": ["Option A", "Option B", "Option C", "Option D"],
-      "correct_index": 0,
-      "explanation": "Brief explanation referencing the source text."
-    }}
+  "title": "Examination Question Paper",
+  "section_a": [
+    "1-mark Question 1?",
+    "1-mark Question 2?",
+    "1-mark Question 3?",
+    "1-mark Question 4?",
+    "1-mark Question 5?"
+  ],
+  "section_b": [
+    "3-mark Question 1?",
+    "3-mark Question 2?",
+    "3-mark Question 3?"
+  ],
+  "section_c": [
+    "5-mark Question 1?",
+    "5-mark Question 2?",
+    "5-mark Question 3?"
   ]
 }}"""
 
         response_text = self._call_ollama(prompt, json_format=True)
+
+        clean_text = response_text.strip()
+        if "```" in clean_text:
+            parts = clean_text.split("```")
+            for part in parts:
+                if part.strip().startswith("json"):
+                    clean_text = part.strip()[4:].strip()
+                    break
+                elif part.strip().startswith("{"):
+                    clean_text = part.strip()
+                    break
+
         try:
-            data = json.loads(response_text)
-            return data.get("questions", [])
+            data = json.loads(clean_text)
+            return {
+                "title": str(data.get("title", "Formal Question Paper")).strip(),
+                "section_a": [str(q).strip() for q in data.get("section_a", []) if str(q).strip()][:5],
+                "section_b": [str(q).strip() for q in data.get("section_b", []) if str(q).strip()][:3],
+                "section_c": [str(q).strip() for q in data.get("section_c", []) if str(q).strip()][:3]
+            }
         except Exception:
-            return []
+            return {}
 
     def answer_question(self, user_question: str, context_chunks: list) -> str:
-        """Answers user queries grounded strictly in retrieved PDF context."""
+        """Answers user queries grounded in retrieved document context."""
         context_str = "\n\n---\n\n".join(context_chunks)
         
-        prompt = f"""You are a helpful AI study assistant. Answer the user's question using ONLY the context provided from their document. If the answer cannot be found in the context, state "I couldn't find that specific information in the document."
+        prompt = f"""Answer the question using ONLY the provided document context. If not found, say "I couldn't find that in the document."
 
-Document Passages:
+Context:
 {context_str}
 
-User Question: {user_question}
+Question: {user_question}
 Answer:"""
 
         return self._call_ollama(prompt, json_format=False)
+
 
 # =====================================================================
 # 3. STREAMLIT INTERFACE
@@ -314,7 +402,7 @@ Answer:"""
 def main():
     st.set_page_config(page_title="PDF AI Learning Assistant", page_icon="📄", layout="wide")
     
-    # Initialize session state
+    # Initialize session states
     if "engine" not in st.session_state:
         st.session_state.engine = IntelligentPDFEngine()
     if "pdf_text" not in st.session_state:
@@ -323,8 +411,18 @@ def main():
         st.session_state.pdf_chunks = []
     if "chat_history" not in st.session_state:
         st.session_state.chat_history = []
+    
+    # Session state for Quiz Performance Tracker
+    if "quiz_stats" not in st.session_state:
+        st.session_state.quiz_stats = {
+            "total_answered": 0,
+            "correct": 0,
+            "incorrect": 0,
+            "history": []
+        }
+    if "answered_questions" not in st.session_state:
+        st.session_state.answered_questions = set()
 
-    # Sidebar Config
     st.sidebar.title("⚙️ Local Model Settings")
     model_name = st.sidebar.text_input("Ollama Model Name", value="llama3.2:1b")
     if model_name != st.session_state.engine.ollama_model:
@@ -332,49 +430,54 @@ def main():
 
     st.sidebar.markdown("---")
     st.sidebar.title("📄 Upload Document")
-    uploaded_file = st.sidebar.file_uploader(
-        "Upload PDF, DOCX, or PPTX",
-        type=["pdf", "docx", "pptx"]
-    )
+    uploaded_file = st.sidebar.file_uploader("Upload PDF, DOCX, or PPTX", type=["pdf", "docx", "pptx"])
 
     if uploaded_file is not None:
         file_type = uploaded_file.name.rsplit(".", 1)[-1].lower()
         if st.sidebar.button("Process Document 🚀", type="primary"):
-            with st.spinner("Extracting text and indexing document..."):
+            with st.spinner("Extracting text..."):
                 text = extract_document_text(uploaded_file, file_type)
                 if not text:
-                    st.sidebar.error("No readable text was found in this file.")
+                    st.sidebar.error("No readable text found in file.")
                 else:
                     chunks = chunk_text(text)
                     st.session_state.pdf_text = text
                     st.session_state.pdf_chunks = chunks
-                    st.session_state.file_type = file_type
-                    st.session_state.file_name = uploaded_file.name
-                    # Clear cached previous document data
                     st.session_state.pop("summary_data", None)
                     st.session_state.pop("quiz_data", None)
+                    st.session_state.pop("qp_data", None)
                     st.session_state.chat_history = []
-                    st.sidebar.success(f"Indexed {len(chunks)} chunks from {file_type.upper()}!")
+                    st.sidebar.success(f"Indexed {len(chunks)} retrieval chunks!")
 
-    # Main Content Area
     st.title("📚 Intelligent Document Learning Assistant")
 
     if not st.session_state.pdf_text:
-        st.info("👈 Upload a PDF, DOCX, or PPTX file from the sidebar and click **Process Document** to begin.")
+        st.info("👈 Upload a file from the sidebar and click **Process Document** to begin.")
         return
 
-    tab1, tab2, tab3 = st.tabs(["📖 Document Summary", "❓ Practice Quiz", "💬 Document Q&A"])
+    tab1, tab2, tab3, tab4, tab5 = st.tabs([
+        "📖 Summary", 
+        "❓ Practice Quiz", 
+        "📝 Question Paper", 
+        "💬 Q&A",
+        "📊 Performance Dashboard"
+    ])
 
     # --- TAB 1: SUMMARY ---
     with tab1:
-        st.header("📖 AI Document Summary")
-        if st.button("Generate Detailed Summary ✨", type="primary"):
-            with st.spinner("Reading the complete document and building a topic-by-topic summary..."):
-                summary = st.session_state.engine.generate_summary(
-                    st.session_state.pdf_text,
-                    st.session_state.pdf_chunks
-                )
-                st.session_state.summary_data = summary
+        st.header("📖 Fast AI Document Summary")
+        if st.button("Generate Summary ✨", type="primary"):
+            p_bar = st.progress(0.0, text="Starting document analysis...")
+            
+            def update_progress(val, msg):
+                p_bar.progress(val, text=msg)
+
+            summary = st.session_state.engine.generate_summary(
+                st.session_state.pdf_text,
+                progress_callback=update_progress
+            )
+            st.session_state.summary_data = summary
+            p_bar.empty()
 
         if "summary_data" in st.session_state:
             s = st.session_state.summary_data
@@ -383,14 +486,14 @@ def main():
 
             sections = s.get("sections", [])
             if sections:
-                st.subheader("📚 Detailed Topic-by-Topic Summary")
+                st.subheader("📚 Detailed Topic Breakdown")
                 for idx, section in enumerate(sections, start=1):
                     with st.container(border=True):
-                        st.markdown(f"### {idx}. {section.get('title', 'Topic')}" )
+                        st.markdown(f"### {idx}. {section.get('title', 'Topic')}")
                         st.write(section.get("summary", ""))
                         points = section.get("key_points", [])
                         if points:
-                            st.markdown("**Important points:**")
+                            st.markdown("**Key points:**")
                             for point in points:
                                 st.markdown(f"- {point}")
 
@@ -403,37 +506,135 @@ def main():
     with tab2:
         st.header("❓ Practice Quiz")
         if st.button("Generate Questions 🎲", type="primary"):
-            with st.spinner("Generating questions from PDF contents..."):
-                questions = st.session_state.engine.generate_quiz(st.session_state.pdf_chunks)
+            with st.spinner("Generating focused practice questions..."):
+                questions = st.session_state.engine.generate_quiz(st.session_state.pdf_chunks, num_questions=4)
                 st.session_state.quiz_data = questions
 
         if "quiz_data" in st.session_state:
             questions = st.session_state.quiz_data
             if not questions:
-                st.warning("Could not parse quiz JSON from the model. Try clicking 'Generate Questions' again.")
+                st.warning("⚠️ The model couldn't format questions for these sections. Click 'Generate Questions 🎲' to retry!")
             else:
-                for q in questions:
+                for idx, q in enumerate(questions):
                     with st.container(border=True):
-                        st.markdown(f"**Question {q.get('id', '')}:** {q.get('question', '')}")
+                        st.markdown(f"**Question {idx + 1}:** {q['question']}")
                         options = q.get("options", [])
+                        
                         if options:
-                            user_ans = st.radio(f"Select answer for Q{q.get('id')}:", options, key=f"q_rad_{q.get('id')}")
-                            if st.button(f"Submit Q{q.get('id')}", key=f"q_btn_{q.get('id')}"):
+                            user_ans = st.radio(
+                                f"Select answer for Question {idx + 1}:", 
+                                options, 
+                                key=f"q_radio_{idx}"
+                            )
+                            if st.button(f"Submit Answer #{idx + 1}", key=f"q_submit_{idx}"):
                                 selected_idx = options.index(user_ans)
-                                if selected_idx == q.get("correct_index", 0):
+                                correct_idx = q.get("correct_index", 0)
+                                is_correct = (selected_idx == correct_idx)
+                                
+                                # Unique key to prevent double-counting answers
+                                q_key = f"{q['question']}_{idx}"
+                                if q_key not in st.session_state.answered_questions:
+                                    st.session_state.answered_questions.add(q_key)
+                                    st.session_state.quiz_stats["total_answered"] += 1
+                                    if is_correct:
+                                        st.session_state.quiz_stats["correct"] += 1
+                                    else:
+                                        st.session_state.quiz_stats["incorrect"] += 1
+
+                                    st.session_state.quiz_stats["history"].append({
+                                        "question": q["question"],
+                                        "user_ans": user_ans,
+                                        "correct_ans": options[correct_idx],
+                                        "is_correct": is_correct,
+                                        "explanation": q.get("explanation", "")
+                                    })
+
+                                if is_correct:
                                     st.success("🎉 Correct!")
                                 else:
-                                    st.error("❌ Incorrect")
+                                    st.error(f"❌ Incorrect. Correct answer: {options[correct_idx]}")
                                 st.info(f"**Explanation:** {q.get('explanation', '')}")
 
-    # --- TAB 3: DOCUMENT Q&A ---
+    # --- TAB 3: QUESTION PAPER GENERATOR ---
     with tab3:
-        st.header("💬 Ask Questions About the PDF")
-        user_query = st.text_input("Ask any question regarding your uploaded document:")
+        st.header("📝 Formal Examination Question Paper")
+        st.caption("Generates a formal exam paper containing **5 x 1-Mark**, **3 x 3-Mark**, and **3 x 5-Mark** questions.")
+
+        if st.button("Generate Question Paper 📜", type="primary"):
+            with st.spinner("Framing examination question paper..."):
+                qp = st.session_state.engine.generate_question_paper(st.session_state.pdf_chunks)
+                st.session_state.qp_data = qp
+
+        if "qp_data" in st.session_state:
+            qp = st.session_state.qp_data
+            if not qp or not qp.get("section_a"):
+                st.warning("⚠️ Could not generate complete question paper. Click 'Generate Question Paper 📜' to retry!")
+            else:
+                sec_a = qp.get("section_a", [])
+                sec_b = qp.get("section_b", [])
+                sec_c = qp.get("section_c", [])
+
+                st.markdown("---")
+                st.markdown(f"<h2 style='text-align: center;'>{qp.get('title', 'EXAMINATION QUESTION PAPER')}</h2>", unsafe_allow_html=True)
+                
+                col1, col2, col3 = st.columns(3)
+                col1.markdown("**Time Allowed:** 1 Hour")
+                col2.markdown("**Total Questions:** 11")
+                col3.markdown("**Maximum Marks:** 29 Marks")
+                st.markdown("---")
+
+                # Section A
+                st.markdown("### SECTION A: Short Answer Questions (5 x 1 = 5 Marks)")
+                for idx, q in enumerate(sec_a, start=1):
+                    st.markdown(f"**Q{idx}.** {q} `[1 Mark]`")
+
+                st.markdown("---")
+
+                # Section B
+                st.markdown("### SECTION B: Medium Conceptual Questions (3 x 3 = 9 Marks)")
+                for idx, q in enumerate(sec_b, start=6):
+                    st.markdown(f"**Q{idx}.** {q} `[3 Marks]`")
+
+                st.markdown("---")
+
+                # Section C
+                st.markdown("### SECTION C: Descriptive / Essay Questions (3 x 5 = 15 Marks)")
+                for idx, q in enumerate(sec_c, start=9):
+                    st.markdown(f"**Q{idx}.** {q} `[5 Marks]`")
+
+                st.markdown("---")
+
+                paper_text = f"{qp.get('title', 'EXAMINATION QUESTION PAPER')}\n"
+                paper_text += f"Time Allowed: 1 Hour | Total Marks: 29 Marks\n"
+                paper_text += "=" * 50 + "\n\n"
+
+                paper_text += "SECTION A: Short Answer Questions (5 x 1 = 5 Marks)\n"
+                for idx, q in enumerate(sec_a, start=1):
+                    paper_text += f"Q{idx}. {q} [1 Mark]\n"
+                
+                paper_text += "\nSECTION B: Medium Conceptual Questions (3 x 3 = 9 Marks)\n"
+                for idx, q in enumerate(sec_b, start=6):
+                    paper_text += f"Q{idx}. {q} [3 Marks]\n"
+
+                paper_text += "\nSECTION C: Descriptive / Essay Questions (3 x 5 = 15 Marks)\n"
+                for idx, q in enumerate(sec_c, start=9):
+                    paper_text += f"Q{idx}. {q} [5 Marks]\n"
+
+                st.download_button(
+                    label="📥 Download Question Paper (.txt)",
+                    data=paper_text,
+                    file_name="Question_Paper.txt",
+                    mime="text/plain"
+                )
+
+    # --- TAB 4: DOCUMENT Q&A ---
+    with tab4:
+        st.header("💬 Document Q&A")
+        user_query = st.text_input("Ask a question about the document:")
         
         if st.button("Search & Answer 🔍", type="primary"):
             if user_query:
-                with st.spinner("Searching document passages and generating answer..."):
+                with st.spinner("Searching..."):
                     context_chunks = st.session_state.engine.get_relevant_chunks(
                         user_query, st.session_state.pdf_chunks
                     )
@@ -444,7 +645,6 @@ def main():
                         "sources": context_chunks
                     })
 
-        # Display Chat History
         if st.session_state.chat_history:
             st.markdown("---")
             for item in reversed(st.session_state.chat_history):
@@ -452,9 +652,71 @@ def main():
                     st.write(item["query"])
                 with st.chat_message("assistant"):
                     st.markdown(item["answer"])
-                    with st.expander("🔍 View Retrieved PDF Source Passages"):
+                    with st.expander("🔍 View Sources"):
                         for idx, src in enumerate(item["sources"]):
                             st.caption(f"**Passage {idx+1}:** {src}")
+
+    # --- TAB 5: PERFORMANCE DASHBOARD ---
+    with tab5:
+        st.header("📊 Quiz Performance Dashboard")
+        st.caption("Track your quiz accuracy, progress, and review detailed question attempt history.")
+
+        stats = st.session_state.quiz_stats
+        total = stats["total_answered"]
+        correct = stats["correct"]
+        incorrect = stats["incorrect"]
+        accuracy = (correct / total * 100) if total > 0 else 0.0
+
+        # Row 1: Top Metrics Cards
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("Total Answered", total)
+        m2.metric("Correct Answers", correct)
+        m3.metric("Incorrect Answers", incorrect)
+        m4.metric("Accuracy Rate", f"{accuracy:.1f}%")
+
+        st.markdown("---")
+
+        # Row 2: Accuracy Progress & Grade Status
+        st.subheader("🎯 Overall Mastery & Rank")
+        st.progress(accuracy / 100.0, text=f"Mastery Level: {accuracy:.1f}%")
+
+        if total == 0:
+            st.info("💡 Take some practice quizzes in Tab 2 to start tracking your performance!")
+        elif accuracy >= 85:
+            st.success("🏆 **Master Level**: Excellent performance! You have a strong grasp of the material.")
+        elif accuracy >= 60:
+            st.warning("📈 **Intermediate Level**: Good effort! Review the document summary tab to strengthen weak areas.")
+        else:
+            st.error("⚠️ **Beginner Level**: Needs improvement. Re-read the document Q&A and summary for better understanding.")
+
+        st.markdown("---")
+
+        # Row 3: Attempt History Log
+        st.subheader("📋 Detailed Quiz Attempt History")
+        if stats["history"]:
+            for idx, item in enumerate(reversed(stats["history"]), start=1):
+                status_label = "✅ Correct" if item["is_correct"] else "❌ Incorrect"
+                q_num = len(stats["history"]) - idx + 1
+                
+                with st.expander(f"Attempt #{q_num}: {item['question'][:60]}... ({status_label})"):
+                    st.markdown(f"**Question:** {item['question']}")
+                    st.markdown(f"**Your Choice:** {item['user_ans']}")
+                    st.markdown(f"**Correct Answer:** {item['correct_ans']}")
+                    st.markdown(f"**Explanation:** {item['explanation']}")
+        else:
+            st.caption("No quiz attempts recorded yet.")
+
+        st.markdown("---")
+        if st.button("🗑️ Reset Quiz Performance Stats"):
+            st.session_state.quiz_stats = {
+                "total_answered": 0,
+                "correct": 0,
+                "incorrect": 0,
+                "history": []
+            }
+            st.session_state.answered_questions = set()
+            st.success("Performance metrics reset successfully!")
+            st.rerun()
 
 if __name__ == "__main__":
     main()
