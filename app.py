@@ -7,6 +7,8 @@ from docx import Document
 from pptx import Presentation
 from sentence_transformers import SentenceTransformer
 from sklearn.metrics.pairwise import cosine_similarity
+from torch import device
+import torch
 
 # =====================================================================
 # 1. TEXT EXTRACTION & CHUNKING
@@ -103,7 +105,11 @@ class IntelligentPDFEngine:
         self.ollama_model = ollama_model
         self.ollama_url = "http://localhost:11434/api/generate"
         # Load local embedding model (~80MB RAM)
-        self.embedder = SentenceTransformer("all-MiniLM-L6-v2")
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+
+        self.embedder = SentenceTransformer("all-MiniLM-L6-v2",device=device)
+
+        print("Embedding device:", device)
 
     def _call_ollama(self, prompt: str, json_format: bool = False) -> str:
         """Sends a request to the local Ollama instance."""
