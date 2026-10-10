@@ -1,4 +1,5 @@
 import json
+import random
 import requests
 import numpy as np
 import streamlit as st
@@ -108,15 +109,13 @@ class IntelligentPDFEngine:
         device = "cuda" if torch.cuda.is_available() else "cpu"
         self.embedder = SentenceTransformer("all-MiniLM-L6-v2", device=device)
 
-    def _call_ollama(self, prompt: str, json_format: bool = False) -> str:
-        """Sends request to local Ollama instance."""
+    def _call_ollama(self, prompt: str, json_format: bool = False, options: dict = None) -> str:
+        """Sends request to local Ollama instance with optional custom generation parameters."""
         payload = {
             "model": self.ollama_model,
             "prompt": prompt,
             "stream": False,
-            "options": {
-                "num_ctx": 4096
-            }
+            "options": options or {"num_ctx": 4096}
         }
         if json_format:
             payload["format"] = "json"
@@ -235,21 +234,23 @@ Return ONLY valid JSON matching this exact structure:
             }
 
     def generate_quiz(self, chunks: list, num_questions: int = 4) -> list:
-        """Generates clear, sensible quiz questions by focusing on 1 passage at a time."""
+        """Generates completely distinct, randomized quiz questions by sampling random passages and using higher model temperature."""
         if not chunks:
             return []
 
+        # Filter out short/noisy chunks
         valid_chunks = [c for c in chunks if len(c.split()) >= 60]
         if not valid_chunks:
             valid_chunks = chunks
 
-        step = max(1, len(valid_chunks) // num_questions)
-        sampled_chunks = [valid_chunks[i] for i in range(0, len(valid_chunks), step)][:num_questions]
+        # Randomly sample different chunks every time the button is clicked
+        sample_count = min(num_questions, len(valid_chunks))
+        sampled_chunks = random.sample(valid_chunks, sample_count)
 
         validated_questions = []
 
         for idx, passage in enumerate(sampled_chunks):
-            prompt = f"""You are a university professor creating an exam question based strictly on the passage below.
+            prompt = f"""You are a university professor creating a unique exam question based strictly on the passage below.
 
 READ THIS PASSAGE CAREFULLY:
 {passage}
@@ -259,7 +260,7 @@ INSTRUCTIONS:
 2. Provide EXACTLY 4 options:
    - 1 option MUST be definitively CORRECT according to the passage.
    - The other 3 options MUST be plausible, realistic wrong answers related to the subject matter. Do NOT write joke or silly options.
-3. Do NOT ask about page numbers, slide titles, or document layout.
+3. Make sure the question is distinct and focuses on specific details from this passage.
 
 Return ONLY valid JSON matching this exact format:
 {{
@@ -274,7 +275,12 @@ Return ONLY valid JSON matching this exact format:
   "explanation": "State clearly why the correct option is right based on the text."
 }}"""
 
-            response_text = self._call_ollama(prompt, json_format=True)
+            # Use temperature 0.8 to ensure varied phrasing and distinct outputs on every click
+            response_text = self._call_ollama(
+                prompt, 
+                json_format=True, 
+                options={"num_ctx": 4096, "temperature": 0.8}
+            )
 
             clean_text = response_text.strip()
             if "```" in clean_text:
@@ -319,8 +325,9 @@ Return ONLY valid JSON matching this exact format:
         if not valid_chunks:
             valid_chunks = chunks
 
-        step = max(1, len(valid_chunks) // 6)
-        sampled_chunks = [valid_chunks[i] for i in range(0, len(valid_chunks), step)][:6]
+        # Randomly sample chunks for the question paper as well
+        sample_count = min(6, len(valid_chunks))
+        sampled_chunks = random.sample(valid_chunks, sample_count)
         selected_text = "\n\n---\n\n".join(sampled_chunks)
 
         prompt = f"""You are an expert academic examiner framing a formal examination question paper based on the provided text.
@@ -356,7 +363,7 @@ Return ONLY a valid JSON object matching this schema EXACTLY:
   ]
 }}"""
 
-        response_text = self._call_ollama(prompt, json_format=True)
+        response_text = self._call_ollama(prompt, json_format=True, options={"num_ctx": 4096, "temperature": 0.7})
 
         clean_text = response_text.strip()
         if "```" in clean_text:
@@ -402,7 +409,6 @@ Answer:"""
 def main():
     st.set_page_config(page_title="PDF AI Learning Assistant", page_icon="📄", layout="wide")
     
-    # Initialize session states
     if "engine" not in st.session_state:
         st.session_state.engine = IntelligentPDFEngine()
     if "pdf_text" not in st.session_state:
@@ -412,7 +418,6 @@ def main():
     if "chat_history" not in st.session_state:
         st.session_state.chat_history = []
     
-    # Session state for Quiz Performance Tracker
     if "quiz_stats" not in st.session_state:
         st.session_state.quiz_stats = {
             "total_answered": 0,
@@ -505,8 +510,10 @@ def main():
     # --- TAB 2: PRACTICE QUIZ ---
     with tab2:
         st.header("❓ Practice Quiz")
+        st.caption("Clicking 'Generate Questions 🎲' will now randomly sample different sections of your document to give you a fresh set of questions every time!")
+        
         if st.button("Generate Questions 🎲", type="primary"):
-            with st.spinner("Generating focused practice questions..."):
+            with st.spinner("Sampling document and generating fresh practice questions..."):
                 questions = st.session_state.engine.generate_quiz(st.session_state.pdf_chunks, num_questions=4)
                 st.session_state.quiz_data = questions
 
@@ -531,7 +538,6 @@ def main():
                                 correct_idx = q.get("correct_index", 0)
                                 is_correct = (selected_idx == correct_idx)
                                 
-                                # Unique key to prevent double-counting answers
                                 q_key = f"{q['question']}_{idx}"
                                 if q_key not in st.session_state.answered_questions:
                                     st.session_state.answered_questions.add(q_key)
@@ -583,21 +589,18 @@ def main():
                 col3.markdown("**Maximum Marks:** 29 Marks")
                 st.markdown("---")
 
-                # Section A
                 st.markdown("### SECTION A: Short Answer Questions (5 x 1 = 5 Marks)")
                 for idx, q in enumerate(sec_a, start=1):
                     st.markdown(f"**Q{idx}.** {q} `[1 Mark]`")
 
                 st.markdown("---")
 
-                # Section B
                 st.markdown("### SECTION B: Medium Conceptual Questions (3 x 3 = 9 Marks)")
                 for idx, q in enumerate(sec_b, start=6):
                     st.markdown(f"**Q{idx}.** {q} `[3 Marks]`")
 
                 st.markdown("---")
 
-                # Section C
                 st.markdown("### SECTION C: Descriptive / Essay Questions (3 x 5 = 15 Marks)")
                 for idx, q in enumerate(sec_c, start=9):
                     st.markdown(f"**Q{idx}.** {q} `[5 Marks]`")
@@ -667,7 +670,6 @@ def main():
         incorrect = stats["incorrect"]
         accuracy = (correct / total * 100) if total > 0 else 0.0
 
-        # Row 1: Top Metrics Cards
         m1, m2, m3, m4 = st.columns(4)
         m1.metric("Total Answered", total)
         m2.metric("Correct Answers", correct)
@@ -676,7 +678,6 @@ def main():
 
         st.markdown("---")
 
-        # Row 2: Accuracy Progress & Grade Status
         st.subheader("🎯 Overall Mastery & Rank")
         st.progress(accuracy / 100.0, text=f"Mastery Level: {accuracy:.1f}%")
 
@@ -691,7 +692,6 @@ def main():
 
         st.markdown("---")
 
-        # Row 3: Attempt History Log
         st.subheader("📋 Detailed Quiz Attempt History")
         if stats["history"]:
             for idx, item in enumerate(reversed(stats["history"]), start=1):
