@@ -234,7 +234,7 @@ Return ONLY valid JSON matching this exact structure:
             }
 
     def generate_quiz(self, chunks: list, num_questions: int = 4) -> list:
-        """Generates completely distinct, randomized quiz questions by sampling random passages and using higher model temperature."""
+        """Generates completely distinct, randomized quiz questions."""
         if not chunks:
             return []
 
@@ -257,7 +257,7 @@ INSTRUCTIONS:
 1. Create ONE clear, realistic multiple-choice question testing a main concept explained in the passage.
 2. Provide EXACTLY 4 options:
    - 1 option MUST be definitively CORRECT according to the passage.
-   - The other 3 options MUST be plausible, realistic wrong answers related to the subject matter. Do NOT write joke or silly options.
+   - The other 3 options MUST be plausible, realistic wrong answers related to the subject matter.
 3. Make sure the question is distinct and focuses on specific details from this passage.
 
 Return ONLY valid JSON matching this exact format:
@@ -313,8 +313,10 @@ Return ONLY valid JSON matching this exact format:
 
         return validated_questions
 
-    def generate_question_paper(self, chunks: list) -> dict:
-        """Generates a formal exam question paper containing 5x 1-mark, 3x 3-mark, and 3x 5-mark questions ONLY."""
+    def generate_question_paper(self, chunks: list, pyq_text: str = "") -> dict:
+        """Generates a formal exam question paper containing 5x 1-mark, 3x 3-mark, and 3x 5-mark questions.
+        Factors in previous years' question papers (PYQs) to prioritize common themes if provided.
+        """
         if not chunks:
             return {}
 
@@ -326,20 +328,32 @@ Return ONLY valid JSON matching this exact format:
         sampled_chunks = random.sample(valid_chunks, sample_count)
         selected_text = "\n\n---\n\n".join(sampled_chunks)
 
-        prompt = f"""You are an expert academic examiner framing a formal examination question paper based on the provided text.
+        pyq_instruction = ""
+        if pyq_text.strip():
+            pyq_instruction = f"""
+PREVIOUS YEARS' QUESTION PAPERS (PYQs) FOR TREND ANALYSIS:
+{pyq_text[:4000]}
 
-SOURCE MATERIAL:
+INSTRUCTION REGARDING PYQs:
+Analyze the provided PYQs above to identify recurring concepts, frequently asked questions, and core themes. Heavily prioritize and weight these common topics when framing the new question paper.
+"""
+
+        prompt = f"""You are an expert academic examiner framing a formal examination question paper.
+
+{pyq_instruction}
+
+SOURCE MATERIAL (TEXTBOOK/NOTES):
 {selected_text}
 
 REQUIREMENTS:
-Generate a Question Paper containing ONLY QUESTIONS (no answers or options) structured as follows:
+Generate a Question Paper containing ONLY QUESTIONS structured as follows:
 - Section A: EXACTLY 5 short, direct questions worth 1 Mark each.
 - Section B: EXACTLY 3 short-answer conceptual questions worth 3 Marks each.
 - Section C: EXACTLY 3 detailed analytical/essay questions worth 5 Marks each.
 
 Return ONLY a valid JSON object matching this schema EXACTLY:
 {{
-  "title": "Examination Question Paper",
+  "title": "Examination Question Paper (PYQ-Aligned)",
   "section_a": [
     "1-mark Question 1?",
     "1-mark Question 2?",
@@ -375,7 +389,7 @@ Return ONLY a valid JSON object matching this schema EXACTLY:
         try:
             data = json.loads(clean_text)
             return {
-                "title": str(data.get("title", "Formal Question Paper")).strip(),
+                "title": str(data.get("title", "Examination Question Paper")).strip(),
                 "section_a": [str(q).strip() for q in data.get("section_a", []) if str(q).strip()][:5],
                 "section_b": [str(q).strip() for q in data.get("section_b", []) if str(q).strip()][:3],
                 "section_c": [str(q).strip() for q in data.get("section_c", []) if str(q).strip()][:3]
@@ -397,13 +411,29 @@ Answer:"""
 
         return self._call_ollama(prompt, json_format=False)
 
+    def tutor_explain(self, query: str, context_chunks: list, language: str = "Hindi") -> str:
+        """Explains concept in the target language (e.g. Hindi) using retrieved context."""
+        context_str = "\n\n---\n\n".join(context_chunks)
+        
+        prompt = f"""You are a helpful, friendly, and patient AI tutor helping a student understand their study materials. 
+Explain the answer or concept in fluent {language} (use a natural, conversational teaching tone, keeping important technical terms or headings clear). 
+Base your explanation STRICTLY on the provided context. If the answer is not in the context, politely state so in {language}.
+
+Context Passages:
+{context_str}
+
+Student Question / Concept: {query}
+Tutor Explanation ({language}):"""
+
+        return self._call_ollama(prompt, json_format=False, options={"num_ctx": 4096, "temperature": 0.7})
+
 
 # =====================================================================
 # 3. STREAMLIT INTERFACE
 # =====================================================================
 
 def main():
-    st.set_page_config(page_title="Multi-Document AI Assistant", page_icon="📚", layout="wide")
+    st.set_page_config(page_title="Multi-Document AI Assistant & Tutor", page_icon="📚", layout="wide")
     
     if "engine" not in st.session_state:
         st.session_state.engine = IntelligentPDFEngine()
@@ -415,6 +445,8 @@ def main():
         st.session_state.file_names = []
     if "chat_history" not in st.session_state:
         st.session_state.chat_history = []
+    if "tutor_history" not in st.session_state:
+        st.session_state.tutor_history = []
     
     if "quiz_stats" not in st.session_state:
         st.session_state.quiz_stats = {
@@ -434,7 +466,6 @@ def main():
     st.sidebar.markdown("---")
     st.sidebar.title("📁 Upload Documents")
     
-    # accept_multiple_files=True enables selecting multiple files
     uploaded_files = st.sidebar.file_uploader(
         "Upload PDF, DOCX, or PPTX files", 
         type=["pdf", "docx", "pptx"], 
@@ -465,9 +496,10 @@ def main():
                     st.session_state.pop("quiz_data", None)
                     st.session_state.pop("qp_data", None)
                     st.session_state.chat_history = []
+                    st.session_state.tutor_history = []
                     st.sidebar.success(f"Successfully indexed {len(file_names)} file(s) into {len(chunks)} chunks!")
 
-    st.title("📚 Intelligent Multi-Document Learning Assistant")
+    st.title("📚 Intelligent Multi-Document Learning Assistant & AI Tutor")
 
     if not st.session_state.pdf_text:
         st.info("👈 Upload one or more files from the sidebar and click **Process Documents** to begin.")
@@ -475,12 +507,13 @@ def main():
 
     st.success(f"📄 Active File Library: **{', '.join(st.session_state.file_names)}** ({len(st.session_state.pdf_text.split()):,} total words)")
 
-    tab1, tab2, tab3, tab4, tab5 = st.tabs([
+    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
         "📖 Summary", 
         "❓ Practice Quiz", 
         "📝 Question Paper", 
         "💬 Q&A",
-        "📊 Performance Dashboard"
+        "🗣️ AI Tutor (Hindi/Multilingual)",
+        "📊 Dashboard"
     ])
 
     # --- TAB 1: SUMMARY ---
@@ -576,14 +609,34 @@ def main():
                                     st.error(f"❌ Incorrect. Correct answer: {options[correct_idx]}")
                                 st.info(f"**Explanation:** {q.get('explanation', '')}")
 
-    # --- TAB 3: QUESTION PAPER GENERATOR ---
+    # --- TAB 3: QUESTION PAPER GENERATOR & PYQ ANALYSIS ---
     with tab3:
-        st.header("📝 Formal Examination Question Paper")
-        st.caption("Generates a formal exam paper covering your active document library containing **5 x 1-Mark**, **3 x 3-Mark**, and **3 x 5-Mark** questions.")
+        st.header("📝 Formal Examination Question Paper with PYQ Analysis")
+        st.caption("Upload previous years' question papers (PYQs) below to analyze common questions and trends. The generated exam paper will prioritize these recurring themes!")
+
+        pyq_files = st.file_uploader(
+            "Upload Previous Years' Question Papers (PDF, DOCX, PPTX)", 
+            type=["pdf", "docx", "pptx"], 
+            accept_multiple_files=True,
+            key="pyq_files_uploader"
+        )
+        
+        pyq_text_content = ""
+        if pyq_files:
+            for pyq in pyq_files:
+                f_type = pyq.name.rsplit(".", 1)[-1].lower()
+                t_content = extract_document_text(pyq, f_type)
+                if t_content:
+                    pyq_text_content += f"\n\n--- PYQ FILE: {pyq.name} ---\n\n" + t_content
+            if pyq_text_content.strip():
+                st.success(f"Successfully loaded {len(pyq_files)} PYQ file(s) for trend & common question analysis!")
 
         if st.button("Generate Question Paper 📜", type="primary"):
-            with st.spinner("Framing examination question paper..."):
-                qp = st.session_state.engine.generate_question_paper(st.session_state.pdf_chunks)
+            with st.spinner("Analyzing past exam trends and framing examination question paper..."):
+                qp = st.session_state.engine.generate_question_paper(
+                    st.session_state.pdf_chunks, 
+                    pyq_text=pyq_text_content
+                )
                 st.session_state.qp_data = qp
 
         if "qp_data" in st.session_state:
@@ -641,7 +694,7 @@ def main():
                 st.download_button(
                     label="📥 Download Question Paper (.txt)",
                     data=paper_text,
-                    file_name="Question_Paper.txt",
+                    file_name="PYQ_Aligned_Question_Paper.txt",
                     mime="text/plain"
                 )
 
@@ -674,8 +727,51 @@ def main():
                         for idx, src in enumerate(item["sources"]):
                             st.caption(f"**Passage {idx+1}:** {src}")
 
-    # --- TAB 5: PERFORMANCE DASHBOARD ---
+    # --- TAB 5: AI TUTOR (HINDI / MULTILINGUAL) ---
     with tab5:
+        st.header("🗣️ AI Tutor (Multilingual / Hindi)")
+        st.caption("Ask your AI tutor to explain any difficult concept or topic from your documents in **Hindi**, **Hinglish**, or any other language.")
+
+        t_col1, t_col2 = st.columns([2, 1])
+        with t_col2:
+            target_language = st.selectbox(
+                "Choose Language / भाषा चुनें:", 
+                ["Hindi (हिंदी)", "Hinglish", "English", "Spanish", "French", "German"]
+            )
+        
+        with t_col1:
+            tutor_query = st.text_input("What concept do you want explained?", placeholder="e.g., Explain photosynthesis or the main theorem...")
+
+        if st.button("Explain to Me 🎓", type="primary"):
+            if tutor_query:
+                with st.spinner(f"AI Tutor is preparing an explanation in {target_language}..."):
+                    context_chunks = st.session_state.engine.get_relevant_chunks(
+                        tutor_query, st.session_state.pdf_chunks, top_k=3
+                    )
+                    explanation = st.session_state.engine.tutor_explain(
+                        tutor_query, context_chunks, language=target_language
+                    )
+                    st.session_state.tutor_history.append({
+                        "query": tutor_query,
+                        "language": target_language,
+                        "explanation": explanation,
+                        "sources": context_chunks
+                    })
+
+        if st.session_state.tutor_history:
+            st.markdown("---")
+            st.subheader("💬 Tutor Session History")
+            for item in reversed(st.session_state.tutor_history):
+                with st.chat_message("user"):
+                    st.write(f"**[{item['language']}]** {item['query']}")
+                with st.chat_message("assistant"):
+                    st.markdown(item["explanation"])
+                    with st.expander("🔍 View Source Passages"):
+                        for idx, src in enumerate(item["sources"]):
+                            st.caption(f"**Passage {idx+1}:** {src}")
+
+    # --- TAB 6: PERFORMANCE DASHBOARD ---
+    with tab6:
         st.header("📊 Quiz Performance Dashboard")
         st.caption("Track your quiz accuracy, progress, and review detailed question attempt history.")
 
