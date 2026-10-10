@@ -1,7 +1,5 @@
 import json
 import random
-import sqlite3
-import datetime
 import requests
 import numpy as np
 import streamlit as st
@@ -13,157 +11,11 @@ from sklearn.metrics.pairwise import cosine_similarity
 import torch
 
 # =====================================================================
-# 1. SQLITE DATABASE MANAGER FOR PERSISTENT STORAGE
-# =====================================================================
-
-class DatabaseManager:
-    def __init__(self, db_path: str = "learning_assistant.db"):
-        self.db_path = db_path
-        self._init_db()
-
-    def _init_db(self):
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        # Chat History Table
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS chat_history (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                query TEXT,
-                answer TEXT,
-                timestamp TEXT
-            )
-        """)
-        # Quiz Attempts Table
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS quiz_attempts (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                question TEXT,
-                user_ans TEXT,
-                correct_ans TEXT,
-                is_correct INTEGER,
-                explanation TEXT,
-                timestamp TEXT
-            )
-        """)
-        # Tutor Sessions Table
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS tutor_sessions (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                query TEXT,
-                language TEXT,
-                explanation TEXT,
-                timestamp TEXT
-            )
-        """)
-        # Generated Content Table (Summaries, Question Papers)
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS generated_content (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                content_type TEXT,
-                content_json TEXT,
-                timestamp TEXT
-            )
-        """)
-        conn.commit()
-        conn.close()
-
-    def save_chat(self, query: str, answer: str):
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        cursor.execute("INSERT INTO chat_history (query, answer, timestamp) VALUES (?, ?, ?)",
-                       (query, answer, str(datetime.datetime.now())))
-        conn.commit()
-        conn.close()
-
-    def save_quiz_attempt(self, q: str, user_ans: str, correct_ans: str, is_correct: bool, explanation: str):
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        cursor.execute("""
-            INSERT INTO quiz_attempts (question, user_ans, correct_ans, is_correct, explanation, timestamp)
-            VALUES (?, ?, ?, ?, ?, ?)
-        """, (q, user_ans, correct_ans, int(is_correct), explanation, str(datetime.datetime.now())))
-        conn.commit()
-        conn.close()
-
-    def save_tutor_session(self, query: str, language: str, explanation: str):
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        cursor.execute("""
-            INSERT INTO tutor_sessions (query, language, explanation, timestamp)
-            VALUES (?, ?, ?, ?)
-        """, (query, language, explanation, str(datetime.datetime.now())))
-        conn.commit()
-        conn.close()
-
-    def save_content(self, content_type: str, content_dict: dict):
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        cursor.execute("""
-            INSERT INTO generated_content (content_type, content_json, timestamp)
-            VALUES (?, ?, ?)
-        """, (content_type, json.dumps(content_dict), str(datetime.datetime.now())))
-        conn.commit()
-        conn.close()
-
-    def load_all_history(self):
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        
-        # Load Chats
-        cursor.execute("SELECT query, answer FROM chat_history ORDER BY id ASC")
-        chats = [{"query": r[0], "answer": r[1]} for r in cursor.fetchall()]
-
-        # Load Quiz History & Stats
-        cursor.execute("SELECT question, user_ans, correct_ans, is_correct, explanation FROM quiz_attempts ORDER BY id ASC")
-        quiz_history = []
-        correct_count = 0
-        incorrect_count = 0
-        for r in cursor.fetchall():
-            is_corr = bool(r[3])
-            if is_corr:
-                correct_count += 1
-            else:
-                incorrect_count += 1
-            quiz_history.append({
-                "question": r[0],
-                "user_ans": r[1],
-                "correct_ans": r[2],
-                "is_correct": is_corr,
-                "explanation": r[4]
-            })
-
-        # Load Tutor Sessions
-        cursor.execute("SELECT query, language, explanation FROM tutor_sessions ORDER BY id ASC")
-        tutor = [{"query": r[0], "language": r[1], "explanation": r[2]} for r in cursor.fetchall()]
-
-        # Load Latest Summary / Question Paper if available
-        cursor.execute("SELECT content_json FROM generated_content WHERE content_type = 'summary' ORDER BY id DESC LIMIT 1")
-        sum_row = cursor.fetchone()
-        latest_summary = json.loads(sum_row[0]) if sum_row else None
-
-        cursor.execute("SELECT content_json FROM generated_content WHERE content_type = 'question_paper' ORDER BY id DESC LIMIT 1")
-        qp_row = cursor.fetchone()
-        latest_qp = json.loads(qp_row[0]) if qp_row else None
-
-        conn.close()
-        return chats, quiz_history, correct_count, incorrect_count, tutor, latest_summary, latest_qp
-
-    def clear_database(self):
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        cursor.execute("DELETE FROM chat_history")
-        cursor.execute("DELETE FROM quiz_attempts")
-        cursor.execute("DELETE FROM tutor_sessions")
-        cursor.execute("DELETE FROM generated_content")
-        conn.commit()
-        conn.close()
-
-
-# =====================================================================
-# 2. TEXT EXTRACTION & CHUNKING
+# 1. TEXT EXTRACTION & CHUNKING
 # =====================================================================
 
 def extract_pdf_text(uploaded_file) -> str:
+    """Extract clean text from an uploaded PDF file."""
     pdf_reader = PdfReader(uploaded_file)
     extracted_text = ""
     for page_num, page in enumerate(pdf_reader.pages):
@@ -174,41 +26,56 @@ def extract_pdf_text(uploaded_file) -> str:
 
 
 def extract_docx_text(uploaded_file) -> str:
+    """Extract text from paragraphs and tables in a DOCX file."""
     doc = Document(uploaded_file)
     parts = []
+
     for idx, paragraph in enumerate(doc.paragraphs, start=1):
         text = paragraph.text.strip()
         if text:
             parts.append(f"[Paragraph {idx}] {text}")
+
     for table_idx, table in enumerate(doc.tables, start=1):
         parts.append(f"[Table {table_idx}]")
         for row in table.rows:
             cells = [cell.text.strip().replace("\n", " | ") for cell in row.cells]
             parts.append(" | ".join(cells))
+
     return "\n".join(parts).strip()
 
 
 def extract_pptx_text(uploaded_file) -> str:
+    """Extract text from slides, tables, and notes in a PPTX file."""
     prs = Presentation(uploaded_file)
     parts = []
+
     for slide_num, slide in enumerate(prs.slides, start=1):
         parts.append(f"\n[Slide {slide_num}]")
+
         for shape in slide.shapes:
             if hasattr(shape, "text") and shape.text and shape.text.strip():
                 parts.append(shape.text.strip())
+
             if getattr(shape, "has_table", False):
                 for row in shape.table.rows:
                     cells = [cell.text.strip().replace("\n", " | ") for cell in row.cells]
                     parts.append(" | ".join(cells))
+
         if slide.has_notes_slide:
-            notes = [shape.text.strip() for shape in slide.notes_slide.notes_text_frame.paragraphs if shape.text.strip()]
+            notes = []
+            for shape in slide.notes_slide.notes_text_frame.paragraphs:
+                text = shape.text.strip()
+                if text:
+                    notes.append(text)
             if notes:
                 parts.append("[Speaker Notes]")
                 parts.extend(notes)
+
     return "\n".join(parts).strip()
 
 
 def extract_document_text(uploaded_file, file_type: str) -> str:
+    """Route uploaded file to the correct text extractor."""
     if file_type == "pdf":
         return extract_pdf_text(uploaded_file)
     if file_type == "docx":
@@ -219,6 +86,7 @@ def extract_document_text(uploaded_file, file_type: str) -> str:
 
 
 def chunk_text(text: str, chunk_size: int = 400, overlap: int = 50) -> list:
+    """Splits document text into overlapping chunks for RAG search."""
     words = text.split()
     if not words:
         return []
@@ -230,7 +98,7 @@ def chunk_text(text: str, chunk_size: int = 400, overlap: int = 50) -> list:
 
 
 # =====================================================================
-# 3. LOCAL RAG & OLLAMA LLM INTEGRATION
+# 2. LOCAL RAG & OLLAMA LLM INTEGRATION
 # =====================================================================
 
 class IntelligentPDFEngine:
@@ -242,6 +110,7 @@ class IntelligentPDFEngine:
         self.embedder = SentenceTransformer("all-MiniLM-L6-v2", device=device)
 
     def _call_ollama(self, prompt: str, json_format: bool = False, options: dict = None) -> str:
+        """Sends request to local Ollama instance with optional custom generation parameters."""
         payload = {
             "model": self.ollama_model,
             "prompt": prompt,
@@ -261,6 +130,7 @@ class IntelligentPDFEngine:
             return f"Error connecting to Ollama: {str(e)}"
 
     def get_relevant_chunks(self, query: str, chunks: list, top_k: int = 3) -> list:
+        """Finds most relevant passages using vector search."""
         if not chunks:
             return []
         query_vec = self.embedder.encode([query])
@@ -270,6 +140,7 @@ class IntelligentPDFEngine:
         return [chunks[i] for i in top_indices]
 
     def generate_summary(self, full_text: str, progress_callback=None) -> dict:
+        """Fast block-aggregated summarization."""
         words = full_text.split()
         if not words:
             return {"overview": "No readable content found.", "sections": [], "key_takeaways": []}
@@ -282,6 +153,7 @@ class IntelligentPDFEngine:
         if total_blocks == 1:
             if progress_callback:
                 progress_callback(0.5, "Generating complete document summary...")
+            
             prompt = f"""You are an academic tutor. Create a comprehensive topic-by-topic study guide for this document.
 
 DOCUMENT TEXT:
@@ -301,9 +173,12 @@ Return ONLY valid JSON with this exact structure:
 }}"""
             res = self._call_ollama(prompt, json_format=True)
             try:
-                return json.loads(res)
+                data = json.loads(res)
+                if isinstance(data, dict):
+                    return data
             except Exception:
-                return {"overview": res, "sections": [], "key_takeaways": []}
+                pass
+            return {"overview": res, "sections": [], "key_takeaways": []}
 
         for idx, block in enumerate(blocks, start=1):
             if progress_callback:
@@ -343,17 +218,23 @@ Return ONLY valid JSON matching this exact structure:
 
         res = self._call_ollama(final_prompt, json_format=True)
         try:
-            return json.loads(res)
+            data = json.loads(res)
+            if isinstance(data, dict):
+                return data
         except Exception:
-            return {
-                "overview": "Section-by-section breakdown compiled below:",
-                "sections": [{"title": f"Block {idx+1}", "summary": text, "key_points": []} for idx, text in enumerate(block_summaries)],
-                "key_takeaways": []
-            }
+            pass
+
+        return {
+            "overview": "Section-by-section breakdown compiled below:",
+            "sections": [{"title": f"Block {idx+1}", "summary": text, "key_points": []} for idx, text in enumerate(block_summaries)],
+            "key_takeaways": []
+        }
 
     def generate_quiz(self, chunks: list, num_questions: int = 4) -> list:
+        """Generates completely distinct, randomized quiz questions."""
         if not chunks:
             return []
+
         valid_chunks = [c for c in chunks if len(c.split()) >= 60] or chunks
         sampled_chunks = random.sample(valid_chunks, min(num_questions, len(valid_chunks)))
         validated_questions = []
@@ -403,8 +284,10 @@ Return ONLY valid JSON matching this exact format:
         return validated_questions
 
     def generate_question_paper(self, chunks: list, pyq_text: str = "") -> dict:
+        """Generates a formal exam question paper containing 5x 1-mark, 3x 3-mark, and 3x 5-mark questions."""
         if not chunks:
             return {}
+
         valid_chunks = [c for c in chunks if len(c.split()) >= 50] or chunks
         sampled_chunks = random.sample(valid_chunks, min(6, len(valid_chunks)))
         selected_text = "\n\n---\n\n".join(sampled_chunks)
@@ -450,6 +333,7 @@ Return ONLY valid JSON matching this schema:
             return {}
 
     def answer_question(self, user_question: str, context_chunks: list) -> str:
+        """Answers user queries grounded in retrieved document context."""
         context_str = "\n\n---\n\n".join(context_chunks)
         prompt = f"""Answer the question using ONLY the provided document context. If not found, say "I couldn't find that in the document."
 
@@ -461,6 +345,7 @@ Answer:"""
         return self._call_ollama(prompt, json_format=False)
 
     def tutor_explain(self, query: str, context_chunks: list, language: str = "Hindi") -> str:
+        """Explains concept in the target language (e.g. Hindi) using retrieved context."""
         context_str = "\n\n---\n\n".join(context_chunks)
         prompt = f"""You are a helpful AI tutor helping a student understand their study materials. 
 Explain the concept in fluent {language} using a conversational teaching tone based strictly on the context.
@@ -474,36 +359,11 @@ Tutor Explanation ({language}):"""
 
 
 # =====================================================================
-# 4. STREAMLIT INTERFACE & DATABASE SYNCHRONIZATION
+# 3. STREAMLIT INTERFACE
 # =====================================================================
 
 def main():
     st.set_page_config(page_title="EduAI Studio — On-Device Learning Assistant", page_icon="🎓", layout="wide")
-
-    # Initialize Database Manager
-    if "db" not in st.session_state:
-        st.session_state.db = DatabaseManager()
-
-    # Initialize Session States from Database
-    if "initialized_from_db" not in st.session_state:
-        chats, quiz_history, correct_count, incorrect_count, tutor, saved_summary, saved_qp = st.session_state.db.load_all_history()
-        
-        st.session_state.chat_history = chats
-        st.session_state.tutor_history = tutor
-        st.session_state.quiz_stats = {
-            "total_answered": correct_count + incorrect_count,
-            "correct": correct_count,
-            "incorrect": incorrect_count,
-            "history": quiz_history
-        }
-        st.session_state.answered_questions = {f"{item['question']}" for item in quiz_history}
-        
-        if saved_summary:
-            st.session_state.summary_data = saved_summary
-        if saved_qp:
-            st.session_state.qp_data = saved_qp
-
-        st.session_state.initialized_from_db = True
 
     if "engine" not in st.session_state:
         st.session_state.engine = IntelligentPDFEngine()
@@ -513,10 +373,23 @@ def main():
         st.session_state.pdf_chunks = []
     if "file_names" not in st.session_state:
         st.session_state.file_names = []
+    if "chat_history" not in st.session_state:
+        st.session_state.chat_history = []
+    if "tutor_history" not in st.session_state:
+        st.session_state.tutor_history = []
+    if "quiz_stats" not in st.session_state:
+        st.session_state.quiz_stats = {
+            "total_answered": 0,
+            "correct": 0,
+            "incorrect": 0,
+            "history": []
+        }
+    if "answered_questions" not in st.session_state:
+        st.session_state.answered_questions = set()
 
     # --- SIDEBAR UI ---
     st.sidebar.markdown("## 🎓 EduAI Studio")
-    st.sidebar.caption("Privacy-First Local Learning Assistant with SQLite Persistence")
+    st.sidebar.caption("Privacy-First Local Learning Assistant")
     st.sidebar.markdown("---")
 
     with st.sidebar.expander("⚙️ Model Configuration", expanded=False):
@@ -550,18 +423,25 @@ def main():
                     st.session_state.pdf_text = combined_text
                     st.session_state.pdf_chunks = chunks
                     st.session_state.file_names = file_names
+                    st.session_state.pop("summary_data", None)
+                    st.session_state.pop("quiz_data", None)
+                    st.session_state.pop("qp_data", None)
+                    st.session_state.chat_history = []
+                    st.session_state.tutor_history = []
                     st.sidebar.success(f"Successfully indexed {len(file_names)} file(s)!")
                     st.toast("Documents processed successfully!", icon="🚀")
 
-    if st.sidebar.button("🗑️ Clear Database History", use_container_width=True):
-        st.session_state.db.clear_database()
+    if st.sidebar.button("🗑️ Reset Session", use_container_width=True):
+        st.session_state.pdf_text = None
+        st.session_state.pdf_chunks = []
+        st.session_state.file_names = []
         st.session_state.chat_history = []
         st.session_state.tutor_history = []
         st.session_state.quiz_stats = {"total_answered": 0, "correct": 0, "incorrect": 0, "history": []}
         st.session_state.answered_questions = set()
         st.session_state.pop("summary_data", None)
         st.session_state.pop("qp_data", None)
-        st.toast("Database history cleared!", icon="🗑️")
+        st.toast("Session reset successfully!", icon="🗑️")
         st.rerun()
 
     # --- MAIN VIEW HEADER ---
@@ -593,9 +473,8 @@ def main():
 
             summary = st.session_state.engine.generate_summary(st.session_state.pdf_text, progress_callback=update_progress)
             st.session_state.summary_data = summary
-            st.session_state.db.save_content("summary", summary)
             p_bar.empty()
-            st.toast("Summary saved to database!", icon="💾")
+            st.toast("Summary generated successfully!", icon="✨")
 
         if "summary_data" in st.session_state:
             s = st.session_state.summary_data
@@ -608,13 +487,17 @@ def main():
                 st.markdown("#### 📚 Detailed Topic Breakdown")
                 for idx, section in enumerate(sections, start=1):
                     with st.container():
-                        st.markdown(f"**{idx}. {section.get('title', 'Topic')}**")
-                        st.write(section.get("summary", ""))
-                        points = section.get("key_points", [])
-                        if points:
-                            st.markdown("*Key Takeaways:*")
-                            for point in points:
-                                st.markdown(f"- {point}")
+                        if isinstance(section, dict):
+                            st.markdown(f"**{idx}. {section.get('title', 'Topic')}**")
+                            st.write(section.get("summary", ""))
+                            points = section.get("key_points", [])
+                            if points:
+                                st.markdown("*Key Takeaways:*")
+                                for point in points:
+                                    st.markdown(f"- {point}")
+                        else:
+                            st.markdown(f"**{idx}. Section {idx}**")
+                            st.write(str(section))
 
             with st.container():
                 st.markdown("#### 🎯 Core Study Takeaways")
@@ -659,11 +542,7 @@ def main():
                                     "is_correct": is_correct,
                                     "explanation": q.get("explanation", "")
                                 })
-                                # Save attempt to SQLite database
-                                st.session_state.db.save_quiz_attempt(
-                                    q["question"], user_ans, options[correct_idx], is_correct, q.get("explanation", "")
-                                )
-                                st.toast("Quiz attempt saved to database!", icon="💾")
+                                st.toast("Quiz attempt recorded!", icon="✅")
 
                             if is_correct:
                                 st.success("🎉 Spot on! Correct Answer.")
@@ -688,8 +567,7 @@ def main():
             with st.spinner("Analyzing themes and framing question paper..."):
                 qp = st.session_state.engine.generate_question_paper(st.session_state.pdf_chunks, pyq_text=pyq_text_content)
                 st.session_state.qp_data = qp
-                st.session_state.db.save_content("question_paper", qp)
-            st.toast("Question paper saved to database!", icon="💾")
+            st.toast("Question paper generated!", icon="📜")
 
         if "qp_data" in st.session_state:
             qp = st.session_state.qp_data
@@ -738,9 +616,7 @@ def main():
                     context_chunks = st.session_state.engine.get_relevant_chunks(user_query, st.session_state.pdf_chunks)
                     answer = st.session_state.engine.answer_question(user_query, context_chunks)
                     st.session_state.chat_history.append({"query": user_query, "answer": answer, "sources": context_chunks})
-                    # Save chat to SQLite database
-                    st.session_state.db.save_chat(user_query, answer)
-                    st.toast("Chat saved to database!", icon="💾")
+                    st.toast("Answer generated!", icon="💬")
 
         if st.session_state.chat_history:
             st.markdown("---")
@@ -764,9 +640,7 @@ def main():
                     context_chunks = st.session_state.engine.get_relevant_chunks(tutor_query, st.session_state.pdf_chunks, top_k=3)
                     explanation = st.session_state.engine.tutor_explain(tutor_query, context_chunks, language=target_language)
                     st.session_state.tutor_history.append({"query": tutor_query, "language": target_language, "explanation": explanation, "sources": context_chunks})
-                    # Save tutor session to SQLite database
-                    st.session_state.db.save_tutor_session(tutor_query, target_language, explanation)
-                    st.toast("Tutor session saved to database!", icon="💾")
+                    st.toast("Tutor explanation ready!", icon="🎓")
 
         if st.session_state.tutor_history:
             st.markdown("---")
@@ -795,7 +669,7 @@ def main():
         st.progress(accuracy / 100.0, text=f"Mastery Level: {accuracy:.1f}%")
 
         st.markdown("---")
-        st.markdown("#### 📋 Attempt History Log (Persistent)")
+        st.markdown("#### 📋 Attempt History Log")
         if stats["history"]:
             for idx, item in enumerate(reversed(stats["history"]), start=1):
                 status_label = "✅ Correct" if item["is_correct"] else "❌ Incorrect"
@@ -808,4 +682,4 @@ def main():
             st.caption("No quiz attempts recorded yet.")
 
 if __name__ == "__main__":
-    main()  
+    main()
