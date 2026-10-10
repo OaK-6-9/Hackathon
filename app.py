@@ -238,12 +238,10 @@ Return ONLY valid JSON matching this exact structure:
         if not chunks:
             return []
 
-        # Filter out short/noisy chunks
         valid_chunks = [c for c in chunks if len(c.split()) >= 60]
         if not valid_chunks:
             valid_chunks = chunks
 
-        # Randomly sample different chunks every time the button is clicked
         sample_count = min(num_questions, len(valid_chunks))
         sampled_chunks = random.sample(valid_chunks, sample_count)
 
@@ -275,7 +273,6 @@ Return ONLY valid JSON matching this exact format:
   "explanation": "State clearly why the correct option is right based on the text."
 }}"""
 
-            # Use temperature 0.8 to ensure varied phrasing and distinct outputs on every click
             response_text = self._call_ollama(
                 prompt, 
                 json_format=True, 
@@ -325,7 +322,6 @@ Return ONLY valid JSON matching this exact format:
         if not valid_chunks:
             valid_chunks = chunks
 
-        # Randomly sample chunks for the question paper as well
         sample_count = min(6, len(valid_chunks))
         sampled_chunks = random.sample(valid_chunks, sample_count)
         selected_text = "\n\n---\n\n".join(sampled_chunks)
@@ -407,7 +403,7 @@ Answer:"""
 # =====================================================================
 
 def main():
-    st.set_page_config(page_title="PDF AI Learning Assistant", page_icon="📄", layout="wide")
+    st.set_page_config(page_title="Multi-Document AI Assistant", page_icon="📚", layout="wide")
     
     if "engine" not in st.session_state:
         st.session_state.engine = IntelligentPDFEngine()
@@ -415,6 +411,8 @@ def main():
         st.session_state.pdf_text = None
     if "pdf_chunks" not in st.session_state:
         st.session_state.pdf_chunks = []
+    if "file_names" not in st.session_state:
+        st.session_state.file_names = []
     if "chat_history" not in st.session_state:
         st.session_state.chat_history = []
     
@@ -434,31 +432,48 @@ def main():
         st.session_state.engine.ollama_model = model_name
 
     st.sidebar.markdown("---")
-    st.sidebar.title("📄 Upload Document")
-    uploaded_file = st.sidebar.file_uploader("Upload PDF, DOCX, or PPTX", type=["pdf", "docx", "pptx"])
+    st.sidebar.title("📁 Upload Documents")
+    
+    # accept_multiple_files=True enables selecting multiple files
+    uploaded_files = st.sidebar.file_uploader(
+        "Upload PDF, DOCX, or PPTX files", 
+        type=["pdf", "docx", "pptx"], 
+        accept_multiple_files=True
+    )
 
-    if uploaded_file is not None:
-        file_type = uploaded_file.name.rsplit(".", 1)[-1].lower()
-        if st.sidebar.button("Process Document 🚀", type="primary"):
-            with st.spinner("Extracting text..."):
-                text = extract_document_text(uploaded_file, file_type)
-                if not text:
-                    st.sidebar.error("No readable text found in file.")
+    if uploaded_files:
+        if st.sidebar.button("Process Documents 🚀", type="primary"):
+            with st.spinner("Extracting and combining text from all uploaded files..."):
+                combined_text = ""
+                file_names = []
+                
+                for uploaded_file in uploaded_files:
+                    file_type = uploaded_file.name.rsplit(".", 1)[-1].lower()
+                    text = extract_document_text(uploaded_file, file_type)
+                    if text:
+                        combined_text += f"\n\n=== FILE: {uploaded_file.name} ===\n\n" + text
+                        file_names.append(uploaded_file.name)
+
+                if not combined_text.strip():
+                    st.sidebar.error("No readable text found in the uploaded files.")
                 else:
-                    chunks = chunk_text(text)
-                    st.session_state.pdf_text = text
+                    chunks = chunk_text(combined_text)
+                    st.session_state.pdf_text = combined_text
                     st.session_state.pdf_chunks = chunks
+                    st.session_state.file_names = file_names
                     st.session_state.pop("summary_data", None)
                     st.session_state.pop("quiz_data", None)
                     st.session_state.pop("qp_data", None)
                     st.session_state.chat_history = []
-                    st.sidebar.success(f"Indexed {len(chunks)} retrieval chunks!")
+                    st.sidebar.success(f"Successfully indexed {len(file_names)} file(s) into {len(chunks)} chunks!")
 
-    st.title("📚 Intelligent Document Learning Assistant")
+    st.title("📚 Intelligent Multi-Document Learning Assistant")
 
     if not st.session_state.pdf_text:
-        st.info("👈 Upload a file from the sidebar and click **Process Document** to begin.")
+        st.info("👈 Upload one or more files from the sidebar and click **Process Documents** to begin.")
         return
+
+    st.success(f"📄 Active File Library: **{', '.join(st.session_state.file_names)}** ({len(st.session_state.pdf_text.split()):,} total words)")
 
     tab1, tab2, tab3, tab4, tab5 = st.tabs([
         "📖 Summary", 
@@ -472,7 +487,7 @@ def main():
     with tab1:
         st.header("📖 Fast AI Document Summary")
         if st.button("Generate Summary ✨", type="primary"):
-            p_bar = st.progress(0.0, text="Starting document analysis...")
+            p_bar = st.progress(0.0, text="Starting multi-document analysis...")
             
             def update_progress(val, msg):
                 p_bar.progress(val, text=msg)
@@ -510,10 +525,10 @@ def main():
     # --- TAB 2: PRACTICE QUIZ ---
     with tab2:
         st.header("❓ Practice Quiz")
-        st.caption("Clicking 'Generate Questions 🎲' will now randomly sample different sections of your document to give you a fresh set of questions every time!")
+        st.caption("Clicking 'Generate Questions 🎲' will randomly sample across your uploaded file library to give you a fresh set of questions every time!")
         
         if st.button("Generate Questions 🎲", type="primary"):
-            with st.spinner("Sampling document and generating fresh practice questions..."):
+            with st.spinner("Sampling document library and generating fresh practice questions..."):
                 questions = st.session_state.engine.generate_quiz(st.session_state.pdf_chunks, num_questions=4)
                 st.session_state.quiz_data = questions
 
@@ -564,7 +579,7 @@ def main():
     # --- TAB 3: QUESTION PAPER GENERATOR ---
     with tab3:
         st.header("📝 Formal Examination Question Paper")
-        st.caption("Generates a formal exam paper containing **5 x 1-Mark**, **3 x 3-Mark**, and **3 x 5-Mark** questions.")
+        st.caption("Generates a formal exam paper covering your active document library containing **5 x 1-Mark**, **3 x 3-Mark**, and **3 x 5-Mark** questions.")
 
         if st.button("Generate Question Paper 📜", type="primary"):
             with st.spinner("Framing examination question paper..."):
@@ -633,11 +648,11 @@ def main():
     # --- TAB 4: DOCUMENT Q&A ---
     with tab4:
         st.header("💬 Document Q&A")
-        user_query = st.text_input("Ask a question about the document:")
+        user_query = st.text_input("Ask a question about your uploaded documents:")
         
         if st.button("Search & Answer 🔍", type="primary"):
             if user_query:
-                with st.spinner("Searching..."):
+                with st.spinner("Searching across all files..."):
                     context_chunks = st.session_state.engine.get_relevant_chunks(
                         user_query, st.session_state.pdf_chunks
                     )
