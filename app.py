@@ -314,9 +314,7 @@ Return ONLY valid JSON matching this exact format:
         return validated_questions
 
     def generate_question_paper(self, chunks: list, pyq_text: str = "") -> dict:
-        """Generates a formal exam question paper containing 5x 1-mark, 3x 3-mark, and 3x 5-mark questions.
-        Factors in previous years' question papers (PYQs) to prioritize common themes if provided.
-        """
+        """Generates a formal exam question paper containing 5x 1-mark, 3x 3-mark, and 3x 5-mark questions."""
         if not chunks:
             return {}
 
@@ -429,12 +427,33 @@ Tutor Explanation ({language}):"""
 
 
 # =====================================================================
-# 3. STREAMLIT INTERFACE
+# 3. STREAMLIT INTERFACE & CLEAN UI STYLING
 # =====================================================================
 
 def main():
-    st.set_page_config(page_title="Multi-Document AI Assistant & Tutor", page_icon="📚", layout="wide")
+    st.set_page_config(page_title="EduAI Studio — On-Device Learning Assistant", page_icon="🎓", layout="wide")
     
+    # --- SAFE UI STYLING (No forced background overrides to prevent text contrast issues) ---
+    st.markdown("""
+        <style>
+        .stButton>button {
+            border-radius: 8px;
+            font-weight: 600;
+            padding: 0.5rem 1rem;
+            transition: all 0.2s ease-in-out;
+        }
+        .stTabs [data-baseweb="tab-list"] {
+            gap: 8px;
+            padding: 6px;
+            border-radius: 10px;
+        }
+        .stTabs [data-baseweb="tab"] {
+            border-radius: 6px;
+            font-weight: 600;
+        }
+        </style>
+    """, unsafe_allow_html=True)
+
     if "engine" not in st.session_state:
         st.session_state.engine = IntelligentPDFEngine()
     if "pdf_text" not in st.session_state:
@@ -458,23 +477,26 @@ def main():
     if "answered_questions" not in st.session_state:
         st.session_state.answered_questions = set()
 
-    st.sidebar.title("⚙️ Local Model Settings")
-    model_name = st.sidebar.text_input("Ollama Model Name", value="llama3.2:1b")
-    if model_name != st.session_state.engine.ollama_model:
-        st.session_state.engine.ollama_model = model_name
-
+    # --- SIDEBAR UI ---
+    st.sidebar.markdown("## 🎓 EduAI Studio")
+    st.sidebar.caption("Privacy-First Local Learning Assistant")
     st.sidebar.markdown("---")
-    st.sidebar.title("📁 Upload Documents")
-    
+
+    with st.sidebar.expander("⚙️ Model Configuration", expanded=False):
+        model_name = st.text_input("Ollama Model Name", value="llama3.2:1b")
+        if model_name != st.session_state.engine.ollama_model:
+            st.session_state.engine.ollama_model = model_name
+
+    st.sidebar.markdown("### 📁 Document Library")
     uploaded_files = st.sidebar.file_uploader(
-        "Upload PDF, DOCX, or PPTX files", 
+        "Upload Study Files", 
         type=["pdf", "docx", "pptx"], 
         accept_multiple_files=True
     )
 
     if uploaded_files:
-        if st.sidebar.button("Process Documents 🚀", type="primary"):
-            with st.spinner("Extracting and combining text from all uploaded files..."):
+        if st.sidebar.button("✨ Process Files & Index", type="primary", use_container_width=True):
+            with st.spinner("Extracting & embedding documents..."):
                 combined_text = ""
                 file_names = []
                 
@@ -486,7 +508,7 @@ def main():
                         file_names.append(uploaded_file.name)
 
                 if not combined_text.strip():
-                    st.sidebar.error("No readable text found in the uploaded files.")
+                    st.sidebar.error("No readable text found in uploaded files.")
                 else:
                     chunks = chunk_text(combined_text)
                     st.session_state.pdf_text = combined_text
@@ -497,30 +519,35 @@ def main():
                     st.session_state.pop("qp_data", None)
                     st.session_state.chat_history = []
                     st.session_state.tutor_history = []
-                    st.sidebar.success(f"Successfully indexed {len(file_names)} file(s) into {len(chunks)} chunks!")
+                    st.sidebar.success(f"Successfully indexed {len(file_names)} file(s)!")
+                    st.toast("Documents processed successfully!", icon="🚀")
 
-    st.title("📚 Intelligent Multi-Document Learning Assistant & AI Tutor")
-
+    # --- MAIN VIEW HEADER ---
+    st.markdown("# 🧠 AI-Powered On-Device Learning Studio")
+    
     if not st.session_state.pdf_text:
-        st.info("👈 Upload one or more files from the sidebar and click **Process Documents** to begin.")
+        st.info("👋 **Welcome!** Please upload one or more study documents (`PDF`, `DOCX`, or `PPTX`) from the left sidebar and click **Process Files & Index** to begin.")
         return
 
-    st.success(f"📄 Active File Library: **{', '.join(st.session_state.file_names)}** ({len(st.session_state.pdf_text.split()):,} total words)")
+    st.success(f"📂 **Active Library:** {', '.join(st.session_state.file_names)} — *{len(st.session_state.pdf_text.split()):,} total words indexed*")
 
+    # --- TABS ---
     tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
         "📖 Summary", 
         "❓ Practice Quiz", 
         "📝 Question Paper", 
-        "💬 Q&A",
-        "🗣️ AI Tutor (Hindi/Multilingual)",
+        "💬 Document Q&A",
+        "🗣️ AI Tutor",
         "📊 Dashboard"
     ])
 
     # --- TAB 1: SUMMARY ---
     with tab1:
-        st.header("📖 Fast AI Document Summary")
-        if st.button("Generate Summary ✨", type="primary"):
-            p_bar = st.progress(0.0, text="Starting multi-document analysis...")
+        st.markdown("### 📖 Comprehensive Topic-by-Topic Summary")
+        st.caption("Generates structured study guides across all active files without missing key sections.")
+        
+        if st.button("✨ Generate Full Document Summary", type="primary"):
+            p_bar = st.progress(0.0, text="Analyzing documents...")
             
             def update_progress(val, msg):
                 p_bar.progress(val, text=msg)
@@ -531,53 +558,58 @@ def main():
             )
             st.session_state.summary_data = summary
             p_bar.empty()
+            st.toast("Summary generated successfully!", icon="✨")
 
         if "summary_data" in st.session_state:
             s = st.session_state.summary_data
-            st.subheader("📌 Complete Overview")
-            st.write(s.get("overview", "No overview generated."))
+            
+            with st.container():
+                st.markdown("#### 📌 Executive Overview")
+                st.write(s.get("overview", "No overview generated."))
 
             sections = s.get("sections", [])
             if sections:
-                st.subheader("📚 Detailed Topic Breakdown")
+                st.markdown("#### 📚 Detailed Topic Breakdown")
                 for idx, section in enumerate(sections, start=1):
-                    with st.container(border=True):
-                        st.markdown(f"### {idx}. {section.get('title', 'Topic')}")
+                    with st.container():
+                        st.markdown(f"**{idx}. {section.get('title', 'Topic')}**")
                         st.write(section.get("summary", ""))
                         points = section.get("key_points", [])
                         if points:
-                            st.markdown("**Key points:**")
+                            st.markdown("*Key Takeaways:*")
                             for point in points:
                                 st.markdown(f"- {point}")
 
-            st.subheader("🎯 Key Takeaways")
-            takeaways = s.get("key_takeaways", [])
-            for pt in takeaways:
-                st.markdown(f"- {pt}")
+            with st.container():
+                st.markdown("#### 🎯 Core Study Takeaways")
+                takeaways = s.get("key_takeaways", [])
+                for pt in takeaways:
+                    st.markdown(f"- {pt}")
 
     # --- TAB 2: PRACTICE QUIZ ---
     with tab2:
-        st.header("❓ Practice Quiz")
-        st.caption("Clicking 'Generate Questions 🎲' will randomly sample across your uploaded file library to give you a fresh set of questions every time!")
+        st.markdown("### ❓ Adaptive Practice Quiz")
+        st.caption("Test your knowledge with randomized questions generated directly from your document pool.")
         
-        if st.button("Generate Questions 🎲", type="primary"):
-            with st.spinner("Sampling document library and generating fresh practice questions..."):
+        if st.button("🎲 Generate Fresh Quiz Questions", type="primary"):
+            with st.spinner("Sampling library and building questions..."):
                 questions = st.session_state.engine.generate_quiz(st.session_state.pdf_chunks, num_questions=4)
                 st.session_state.quiz_data = questions
+            st.toast("New quiz generated!", icon="🎲")
 
         if "quiz_data" in st.session_state:
             questions = st.session_state.quiz_data
             if not questions:
-                st.warning("⚠️ The model couldn't format questions for these sections. Click 'Generate Questions 🎲' to retry!")
+                st.warning("⚠️ Could not generate quiz for these passages. Click generate to retry.")
             else:
                 for idx, q in enumerate(questions):
-                    with st.container(border=True):
+                    with st.container():
                         st.markdown(f"**Question {idx + 1}:** {q['question']}")
                         options = q.get("options", [])
                         
                         if options:
                             user_ans = st.radio(
-                                f"Select answer for Question {idx + 1}:", 
+                                f"Select answer for Q{idx + 1}:", 
                                 options, 
                                 key=f"q_radio_{idx}"
                             )
@@ -604,108 +636,100 @@ def main():
                                     })
 
                                 if is_correct:
-                                    st.success("🎉 Correct!")
+                                    st.success("🎉 Spot on! Correct Answer.")
                                 else:
-                                    st.error(f"❌ Incorrect. Correct answer: {options[correct_idx]}")
+                                    st.error(f"❌ Incorrect. Correct answer was: **{options[correct_idx]}**")
                                 st.info(f"**Explanation:** {q.get('explanation', '')}")
 
-    # --- TAB 3: QUESTION PAPER GENERATOR & PYQ ANALYSIS ---
+    # --- TAB 3: QUESTION PAPER & PYQ ANALYSIS ---
     with tab3:
-        st.header("📝 Formal Examination Question Paper with PYQ Analysis")
-        st.caption("Upload previous years' question papers (PYQs) below to analyze common questions and trends. The generated exam paper will prioritize these recurring themes!")
+        st.markdown("### 📝 Formal Examination Question Paper Generator")
+        st.caption("Upload previous years' question papers (PYQs) to analyze trends and generate a tailored exam paper.")
 
-        pyq_files = st.file_uploader(
-            "Upload Previous Years' Question Papers (PDF, DOCX, PPTX)", 
-            type=["pdf", "docx", "pptx"], 
-            accept_multiple_files=True,
-            key="pyq_files_uploader"
-        )
-        
-        pyq_text_content = ""
-        if pyq_files:
-            for pyq in pyq_files:
-                f_type = pyq.name.rsplit(".", 1)[-1].lower()
-                t_content = extract_document_text(pyq, f_type)
-                if t_content:
-                    pyq_text_content += f"\n\n--- PYQ FILE: {pyq.name} ---\n\n" + t_content
-            if pyq_text_content.strip():
-                st.success(f"Successfully loaded {len(pyq_files)} PYQ file(s) for trend & common question analysis!")
+        with st.container():
+            pyq_files = st.file_uploader(
+                "Upload PYQs (Optional)", 
+                type=["pdf", "docx", "pptx"], 
+                accept_multiple_files=True,
+                key="pyq_files_uploader"
+            )
+            
+            pyq_text_content = ""
+            if pyq_files:
+                for pyq in pyq_files:
+                    f_type = pyq.name.rsplit(".", 1)[-1].lower()
+                    t_content = extract_document_text(pyq, f_type)
+                    if t_content:
+                        pyq_text_content += f"\n\n--- PYQ FILE: {pyq.name} ---\n\n" + t_content
+                if pyq_text_content.strip():
+                    st.success(f"Analyzed {len(pyq_files)} PYQ file(s) for exam alignment!")
 
-        if st.button("Generate Question Paper 📜", type="primary"):
-            with st.spinner("Analyzing past exam trends and framing examination question paper..."):
+        if st.button("📜 Generate Exam Paper (5x1, 3x3, 3x5)", type="primary"):
+            with st.spinner("Analyzing themes and framing question paper..."):
                 qp = st.session_state.engine.generate_question_paper(
                     st.session_state.pdf_chunks, 
                     pyq_text=pyq_text_content
                 )
                 st.session_state.qp_data = qp
+            st.toast("Question paper generated!", icon="📜")
 
         if "qp_data" in st.session_state:
             qp = st.session_state.qp_data
             if not qp or not qp.get("section_a"):
-                st.warning("⚠️ Could not generate complete question paper. Click 'Generate Question Paper 📜' to retry!")
+                st.warning("⚠️ Could not generate complete question paper. Try clicking generate again.")
             else:
                 sec_a = qp.get("section_a", [])
                 sec_b = qp.get("section_b", [])
                 sec_c = qp.get("section_c", [])
 
-                st.markdown("---")
-                st.markdown(f"<h2 style='text-align: center;'>{qp.get('title', 'EXAMINATION QUESTION PAPER')}</h2>", unsafe_allow_html=True)
-                
-                col1, col2, col3 = st.columns(3)
-                col1.markdown("**Time Allowed:** 1 Hour")
-                col2.markdown("**Total Questions:** 11")
-                col3.markdown("**Maximum Marks:** 29 Marks")
-                st.markdown("---")
+                with st.container():
+                    st.markdown(f"<h3 style='text-align: center;'>{qp.get('title', 'EXAMINATION QUESTION PAPER')}</h3>", unsafe_allow_html=True)
+                    
+                    col1, col2, col3 = st.columns(3)
+                    col1.metric("Time Allowed", "1 Hour")
+                    col2.metric("Total Questions", "11 Questions")
+                    col3.metric("Max Marks", "29 Marks")
+                    st.markdown("---")
 
-                st.markdown("### SECTION A: Short Answer Questions (5 x 1 = 5 Marks)")
-                for idx, q in enumerate(sec_a, start=1):
-                    st.markdown(f"**Q{idx}.** {q} `[1 Mark]`")
+                    st.markdown("#### SECTION A: Short Answer Questions (5 x 1 = 5 Marks)")
+                    for idx, q in enumerate(sec_a, start=1):
+                        st.markdown(f"**Q{idx}.** {q} `[1 Mark]`")
 
-                st.markdown("---")
+                    st.markdown("---")
+                    st.markdown("#### SECTION B: Medium Conceptual Questions (3 x 3 = 9 Marks)")
+                    for idx, q in enumerate(sec_b, start=6):
+                        st.markdown(f"**Q{idx}.** {q} `[3 Marks]`")
 
-                st.markdown("### SECTION B: Medium Conceptual Questions (3 x 3 = 9 Marks)")
-                for idx, q in enumerate(sec_b, start=6):
-                    st.markdown(f"**Q{idx}.** {q} `[3 Marks]`")
+                    st.markdown("---")
+                    st.markdown("#### SECTION C: Descriptive / Essay Questions (3 x 5 = 15 Marks)")
+                    for idx, q in enumerate(sec_c, start=9):
+                        st.markdown(f"**Q{idx}.** {q} `[5 Marks]`")
 
-                st.markdown("---")
-
-                st.markdown("### SECTION C: Descriptive / Essay Questions (3 x 5 = 15 Marks)")
-                for idx, q in enumerate(sec_c, start=9):
-                    st.markdown(f"**Q{idx}.** {q} `[5 Marks]`")
-
-                st.markdown("---")
-
-                paper_text = f"{qp.get('title', 'EXAMINATION QUESTION PAPER')}\n"
-                paper_text += f"Time Allowed: 1 Hour | Total Marks: 29 Marks\n"
-                paper_text += "=" * 50 + "\n\n"
-
-                paper_text += "SECTION A: Short Answer Questions (5 x 1 = 5 Marks)\n"
-                for idx, q in enumerate(sec_a, start=1):
-                    paper_text += f"Q{idx}. {q} [1 Mark]\n"
-                
-                paper_text += "\nSECTION B: Medium Conceptual Questions (3 x 3 = 9 Marks)\n"
-                for idx, q in enumerate(sec_b, start=6):
-                    paper_text += f"Q{idx}. {q} [3 Marks]\n"
-
-                paper_text += "\nSECTION C: Descriptive / Essay Questions (3 x 5 = 15 Marks)\n"
-                for idx, q in enumerate(sec_c, start=9):
-                    paper_text += f"Q{idx}. {q} [5 Marks]\n"
+                paper_text = f"{qp.get('title', 'EXAMINATION QUESTION PAPER')}\nTime Allowed: 1 Hour | Total Marks: 29 Marks\n" + "="*50 + "\n\n"
+                paper_text += "SECTION A (5 x 1 = 5 Marks)\n"
+                for idx, q in enumerate(sec_a, start=1): paper_text += f"Q{idx}. {q} [1M]\n"
+                paper_text += "\nSECTION B (3 x 3 = 9 Marks)\n"
+                for idx, q in enumerate(sec_b, start=6): paper_text += f"Q{idx}. {q} [3M]\n"
+                paper_text += "\nSECTION C (3 x 5 = 15 Marks)\n"
+                for idx, q in enumerate(sec_c, start=9): paper_text += f"Q{idx}. {q} [5M]\n"
 
                 st.download_button(
                     label="📥 Download Question Paper (.txt)",
                     data=paper_text,
-                    file_name="PYQ_Aligned_Question_Paper.txt",
+                    file_name="Exam_Question_Paper.txt",
                     mime="text/plain"
                 )
 
     # --- TAB 4: DOCUMENT Q&A ---
     with tab4:
-        st.header("💬 Document Q&A")
-        user_query = st.text_input("Ask a question about your uploaded documents:")
+        st.markdown("### 💬 Context-Grounded Document Q&A")
+        st.caption("Ask anything about your uploaded files and receive accurate, source-backed answers.")
+
+        user_query = st.text_input("Ask a question:", placeholder="e.g., What is the main conclusion of chapter 2?")
         
-        if st.button("Search & Answer 🔍", type="primary"):
+        if st.button("🔍 Search & Answer", type="primary"):
             if user_query:
-                with st.spinner("Searching across all files..."):
+                with st.spinner("Searching document library..."):
                     context_chunks = st.session_state.engine.get_relevant_chunks(
                         user_query, st.session_state.pdf_chunks
                     )
@@ -719,32 +743,30 @@ def main():
         if st.session_state.chat_history:
             st.markdown("---")
             for item in reversed(st.session_state.chat_history):
-                with st.chat_message("user"):
-                    st.write(item["query"])
-                with st.chat_message("assistant"):
-                    st.markdown(item["answer"])
-                    with st.expander("🔍 View Sources"):
+                with st.container():
+                    st.markdown(f"**Q:** {item['query']}")
+                    st.markdown(f"**Answer:**\n{item['answer']}")
+                    with st.expander("🔍 View Source Excerpts"):
                         for idx, src in enumerate(item["sources"]):
                             st.caption(f"**Passage {idx+1}:** {src}")
 
-    # --- TAB 5: AI TUTOR (HINDI / MULTILINGUAL) ---
+    # --- TAB 5: AI TUTOR (MULTILINGUAL) ---
     with tab5:
-        st.header("🗣️ AI Tutor (Multilingual / Hindi)")
-        st.caption("Ask your AI tutor to explain any difficult concept or topic from your documents in **Hindi**, **Hinglish**, or any other language.")
+        st.markdown("### 🗣️ Multilingual AI Tutor")
+        st.caption("Understand complex concepts explained patiently in your preferred language (e.g., Hindi, Hinglish, Spanish).")
 
         t_col1, t_col2 = st.columns([2, 1])
         with t_col2:
             target_language = st.selectbox(
-                "Choose Language / भाषा चुनें:", 
+                "Select Language / भाषा चुनें:", 
                 ["Hindi (हिंदी)", "Hinglish", "English", "Spanish", "French", "German"]
             )
-        
         with t_col1:
-            tutor_query = st.text_input("What concept do you want explained?", placeholder="e.g., Explain photosynthesis or the main theorem...")
+            tutor_query = st.text_input("What would you like explained?", placeholder="e.g., Explain the core mechanism...")
 
-        if st.button("Explain to Me 🎓", type="primary"):
+        if st.button("🎓 Explain Concept", type="primary"):
             if tutor_query:
-                with st.spinner(f"AI Tutor is preparing an explanation in {target_language}..."):
+                with st.spinner(f"Preparing tutor explanation in {target_language}..."):
                     context_chunks = st.session_state.engine.get_relevant_chunks(
                         tutor_query, st.session_state.pdf_chunks, top_k=3
                     )
@@ -760,20 +782,18 @@ def main():
 
         if st.session_state.tutor_history:
             st.markdown("---")
-            st.subheader("💬 Tutor Session History")
             for item in reversed(st.session_state.tutor_history):
-                with st.chat_message("user"):
-                    st.write(f"**[{item['language']}]** {item['query']}")
-                with st.chat_message("assistant"):
+                with st.container():
+                    st.markdown(f"**Topic:** {item['query']} *({item['language']})*")
                     st.markdown(item["explanation"])
-                    with st.expander("🔍 View Source Passages"):
+                    with st.expander("🔍 Source References"):
                         for idx, src in enumerate(item["sources"]):
                             st.caption(f"**Passage {idx+1}:** {src}")
 
-    # --- TAB 6: PERFORMANCE DASHBOARD ---
+    # --- TAB 6: DASHBOARD ---
     with tab6:
-        st.header("📊 Quiz Performance Dashboard")
-        st.caption("Track your quiz accuracy, progress, and review detailed question attempt history.")
+        st.markdown("### 📊 Quiz Performance Dashboard")
+        st.caption("Track your quiz accuracy and review historical question attempts.")
 
         stats = st.session_state.quiz_stats
         total = stats["total_answered"]
@@ -783,42 +803,40 @@ def main():
 
         m1, m2, m3, m4 = st.columns(4)
         m1.metric("Total Answered", total)
-        m2.metric("Correct Answers", correct)
-        m3.metric("Incorrect Answers", incorrect)
+        m2.metric("Correct", correct)
+        m3.metric("Incorrect", incorrect)
         m4.metric("Accuracy Rate", f"{accuracy:.1f}%")
 
         st.markdown("---")
-
-        st.subheader("🎯 Overall Mastery & Rank")
+        st.markdown("#### 🎯 Overall Mastery Rank")
         st.progress(accuracy / 100.0, text=f"Mastery Level: {accuracy:.1f}%")
 
         if total == 0:
-            st.info("💡 Take some practice quizzes in Tab 2 to start tracking your performance!")
+            st.info("💡 Take quizzes in Tab 2 to populate your performance metrics!")
         elif accuracy >= 85:
-            st.success("🏆 **Master Level**: Excellent performance! You have a strong grasp of the material.")
+            st.success("🏆 **Master Level**: Outstanding performance! You have mastered this material.")
         elif accuracy >= 60:
-            st.warning("📈 **Intermediate Level**: Good effort! Review the document summary tab to strengthen weak areas.")
+            st.warning("📈 **Intermediate Level**: Good grasp! Review the summary tab to brush up on remaining topics.")
         else:
-            st.error("⚠️ **Beginner Level**: Needs improvement. Re-read the document Q&A and summary for better understanding.")
+            st.error("⚠️ **Beginner Level**: Keep practicing! Use the AI Tutor or Document Q&A to strengthen weak areas.")
 
         st.markdown("---")
-
-        st.subheader("📋 Detailed Quiz Attempt History")
+        st.markdown("#### 📋 Attempt History Log")
         if stats["history"]:
             for idx, item in enumerate(reversed(stats["history"]), start=1):
                 status_label = "✅ Correct" if item["is_correct"] else "❌ Incorrect"
                 q_num = len(stats["history"]) - idx + 1
                 
-                with st.expander(f"Attempt #{q_num}: {item['question'][:60]}... ({status_label})"):
+                with st.expander(f"Attempt #{q_num}: {item['question'][:50]}... ({status_label})"):
                     st.markdown(f"**Question:** {item['question']}")
-                    st.markdown(f"**Your Choice:** {item['user_ans']}")
+                    st.markdown(f"**Your Answer:** {item['user_ans']}")
                     st.markdown(f"**Correct Answer:** {item['correct_ans']}")
                     st.markdown(f"**Explanation:** {item['explanation']}")
         else:
             st.caption("No quiz attempts recorded yet.")
 
         st.markdown("---")
-        if st.button("🗑️ Reset Quiz Performance Stats"):
+        if st.button("🗑️ Reset Dashboard Statistics"):
             st.session_state.quiz_stats = {
                 "total_answered": 0,
                 "correct": 0,
@@ -826,7 +844,7 @@ def main():
                 "history": []
             }
             st.session_state.answered_questions = set()
-            st.success("Performance metrics reset successfully!")
+            st.toast("Dashboard reset!", icon="🗑️")
             st.rerun()
 
 if __name__ == "__main__":
